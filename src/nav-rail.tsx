@@ -23,8 +23,6 @@ const navGroups: NavGroup[] = [
     id: 'core',
     items: [
       { id: 'overview', label: 'Overview', icon: <OverviewIcon />, priority: true },
-      { id: 'agents', label: 'Agents', icon: <AgentsIcon />, priority: true },
-      { id: 'tasks', label: 'Tasks', icon: <TasksIcon />, priority: true },
       { id: 'chat', label: 'Chat', icon: <SessionsIcon />, priority: false },
     ],
   },
@@ -34,16 +32,12 @@ const navGroups: NavGroup[] = [
     items: [
       { id: 'activity', label: 'Activity', icon: <ActivityIcon />, priority: true },
       { id: 'logs', label: 'Logs', icon: <LogsIcon />, priority: true },
-      { id: 'tokens', label: 'Tokens', icon: <TokensIcon />, priority: false },
-      { id: 'memory', label: 'Memory', icon: <MemoryIcon />, priority: false },
     ],
   },
   {
     id: 'automate',
     label: 'AUTOMATE',
     items: [
-      { id: 'cron', label: 'Cron', icon: <CronIcon />, priority: false },
-      { id: 'spawn', label: 'Spawn', icon: <SpawnIcon />, priority: false },
       { id: 'webhooks', label: 'Webhooks', icon: <WebhookIcon />, priority: false },
       { id: 'alerts', label: 'Alerts', icon: <AlertIcon />, priority: false },
     ],
@@ -54,9 +48,7 @@ const navGroups: NavGroup[] = [
     items: [
       { id: 'users', label: 'Users', icon: <UsersIcon />, priority: false },
       { id: 'audit', label: 'Audit', icon: <AuditIcon />, priority: false },
-      { id: 'history', label: 'History', icon: <HistoryIcon />, priority: false },
-      { id: 'gateways', label: 'Gateways', icon: <GatewaysIcon />, priority: false },
-      { id: 'gateway-config', label: 'Config', icon: <GatewayConfigIcon />, priority: false },
+      { id: 'security', label: 'Security', icon: <AuditIcon />, priority: false },
       { id: 'settings', label: 'Settings', icon: <SettingsIcon />, priority: false },
     ],
   },
@@ -93,14 +85,14 @@ export function NavRail() {
           <div className="w-9 h-9 rounded-lg overflow-hidden bg-background border border-border/50 flex items-center justify-center shrink-0">
             <Image
               src="/brand/mc-logo-128.png"
-              alt="Mission Control logo"
+              alt="Endava Security Champion Program logo"
               width={36}
               height={36}
               className="w-full h-full object-cover"
             />
           </div>
           {sidebarExpanded && (
-            <span className="text-sm font-semibold text-foreground truncate flex-1">Mission Control</span>
+            <span className="text-sm font-semibold text-foreground truncate flex-1">Endava Security Champion Program</span>
           )}
           <Button
             variant="ghost"

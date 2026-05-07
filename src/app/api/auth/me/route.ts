@@ -1,34 +1,141 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getUserFromRequest, updateUser, requireRole, destroyAllUserSessions, createSession } from '@/lib/auth'
+import { getUserFromRequest, updateUser, destroyAllUserSessions, createSession } from '@/lib/auth'
 import { logAuditEvent } from '@/lib/db'
 import { verifyPassword } from '@/lib/password'
 import { getMcSessionCookieName, getMcSessionCookieOptions, isRequestSecure } from '@/lib/session-cookie'
 import { passwordChangeLimiter } from '@/lib/rate-limit'
 import { logger } from '@/lib/logger'
+import { isAuthV2Enabled } from '@/lib/feature-flags'
+import { getDatabase } from '@/lib/db'
+
+function hasUsersRegionColumn(db: ReturnType<typeof getDatabase>): boolean {
+  try {
+    const cols = db.prepare('PRAGMA table_info(users)').all() as Array<{ name?: string }>
+    return cols.some(c => c.name === 'region_id')
+  } catch {
+    return false
+  }
+}
+
+function getRegionNameForUserId(db: ReturnType<typeof getDatabase>, userId: number): string | null {
+  try {
+    if (!hasUsersRegionColumn(db)) return null
+    try {
+      const escpRegion = db.prepare(`
+        SELECT r.name as region_name
+        FROM users u
+        LEFT JOIN escp_regions r ON r.id = u.region_id
+        WHERE u.id = ?
+        LIMIT 1
+      `).get(userId) as { region_name?: string | null } | undefined
+      return escpRegion?.region_name ?? null
+    } catch {
+      const legacyRegion = db.prepare(`
+        SELECT r.name as region_name
+        FROM users u
+        LEFT JOIN regions r ON r.id = u.region_id
+        WHERE u.id = ?
+        LIMIT 1
+      `).get(userId) as { region_name?: string | null } | undefined
+      return legacyRegion?.region_name ?? null
+    }
+  } catch {
+    return null
+  }
+}
 
 export async function GET(request: Request) {
-  const auth = requireRole(request, 'viewer')
-  if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
-
   const user = getUserFromRequest(request)
+  const db = getDatabase()
 
-  if (!user) {
-    return NextResponse.json({ error: 'Not authenticated' }, { status: 401 })
+  if (user) {
+    const regionName = getRegionNameForUserId(db, user.id)
+
+    return NextResponse.json({
+      user: {
+        id: user.id,
+        username: user.username,
+        display_name: user.display_name,
+        role: user.role,
+        provider: user.provider || 'local',
+        email: user.email || null,
+        avatar_url: user.avatar_url || null,
+        workspace_id: user.workspace_id ?? 1,
+        tenant_id: user.tenant_id ?? 1,
+        region_name: regionName,
+      },
+    })
   }
 
-  return NextResponse.json({
-    user: {
-      id: user.id,
-      username: user.username,
-      display_name: user.display_name,
-      role: user.role,
-      provider: user.provider || 'local',
-      email: user.email || null,
-      avatar_url: user.avatar_url || null,
-      workspace_id: user.workspace_id ?? 1,
-      tenant_id: user.tenant_id ?? 1,
-    },
-  })
+  // AUTH_V2 bridge: if Better Auth has a valid session cookie but MC legacy
+  // session is missing, map by email and mint the MC session cookie.
+  if (isAuthV2Enabled()) {
+    try {
+      const url = new URL(request.url)
+      const sessionRes = await fetch(`${url.origin}/api/auth/v2/get-session`, {
+        method: 'GET',
+        headers: {
+          cookie: request.headers.get('cookie') || '',
+        },
+      })
+      if (sessionRes.ok) {
+        const payload = await sessionRes.json() as { user?: { email?: string; name?: string } }
+        const email = String(payload?.user?.email || '').toLowerCase().trim()
+        if (email) {
+          const localUser = db.prepare(`
+            SELECT id, username, display_name, role, provider, email, avatar_url,
+                   workspace_id
+            FROM users
+            WHERE lower(email) = lower(?) AND COALESCE(is_approved, 1) = 1
+            LIMIT 1
+          `).get(email) as {
+            id: number
+            username: string
+            display_name: string
+            role: string
+            provider: string | null
+            email: string | null
+            avatar_url: string | null
+            workspace_id: number | null
+          } | undefined
+
+          if (localUser) {
+            const ipAddress = request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || 'unknown'
+            const userAgent = request.headers.get('user-agent') || undefined
+            const { token, expiresAt } = createSession(localUser.id, ipAddress, userAgent, localUser.workspace_id ?? 1)
+            const isSecureRequest = isRequestSecure(request)
+            const cookieName = getMcSessionCookieName(isSecureRequest)
+
+            const response = NextResponse.json({
+              user: {
+                id: localUser.id,
+                username: localUser.username,
+                display_name: localUser.display_name,
+                role: localUser.role,
+                provider: localUser.provider || 'microsoft',
+                email: localUser.email || email,
+                avatar_url: localUser.avatar_url || null,
+                workspace_id: localUser.workspace_id ?? 1,
+                tenant_id: 1,
+                region_name: getRegionNameForUserId(db, localUser.id),
+              },
+            })
+            response.cookies.set(cookieName, token, {
+              ...getMcSessionCookieOptions({
+                maxAgeSeconds: expiresAt - Math.floor(Date.now() / 1000),
+                isSecureRequest,
+              }),
+            })
+            return response
+          }
+        }
+      }
+    } catch (error) {
+      logger.warn({ err: error }, 'AUTH_V2 session bridge failed in /api/auth/me')
+    }
+  }
+
+  return NextResponse.json({ error: 'Not authenticated' }, { status: 401 })
 }
 
 /**

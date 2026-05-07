@@ -5,6 +5,7 @@ import { useTranslations } from 'next-intl'
 import { Button } from '@/components/ui/button'
 import { Loader } from '@/components/ui/loader'
 import { useMissionControl } from '@/store'
+import { formatEnumLabel } from '@/lib/format-enum-label'
 import { useSmartPoll } from '@/lib/use-smart-poll'
 
 interface Activity {
@@ -123,7 +124,7 @@ function ActivityRow({ activity }: { activity: Activity }) {
                       <span className="text-foreground ml-1">{activity.entity.title}</span>
                       {activity.entity.status && (
                         <span className="ml-2 px-1.5 py-0.5 bg-primary/10 text-primary rounded text-[10px]">
-                          {activity.entity.status}
+                          {formatEnumLabel(activity.entity.status)}
                         </span>
                       )}
                     </div>
@@ -145,7 +146,7 @@ function ActivityRow({ activity }: { activity: Activity }) {
                       <span className="text-foreground ml-1">{activity.entity.name}</span>
                       {activity.entity.status && (
                         <span className="ml-2 px-1.5 py-0.5 bg-green-500/10 text-green-400 rounded text-[10px]">
-                          {activity.entity.status}
+                          {formatEnumLabel(activity.entity.status)}
                         </span>
                       )}
                     </div>
@@ -467,7 +468,7 @@ export function ActivityFeedPanel() {
                     </div>
                     <div>
                       <p className="text-sm font-semibold text-foreground">{selectedAgentData.name}</p>
-                      <p className="text-xs text-muted-foreground">{selectedAgentData.role}</p>
+                      <p className="text-xs text-muted-foreground">{formatEnumLabel(selectedAgentData.role)}</p>
                     </div>
                   </div>
 
@@ -485,7 +486,7 @@ export function ActivityFeedPanel() {
                                 : 'text-muted-foreground'
                         }`}
                       >
-                        {selectedAgentData.status}
+                        {formatEnumLabel(selectedAgentData.status)}
                       </span>
                     </div>
                     {selectedAgentData.last_seen && (

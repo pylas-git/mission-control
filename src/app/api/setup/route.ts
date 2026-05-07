@@ -4,6 +4,7 @@ import { createUser, createSession } from '@/lib/auth'
 import { logAuditEvent } from '@/lib/db'
 import { getMcSessionCookieName, getMcSessionCookieOptions, isRequestSecure } from '@/lib/session-cookie'
 import { logger } from '@/lib/logger'
+import { isAuthV2Enabled } from '@/lib/feature-flags'
 
 const INSECURE_PASSWORDS = new Set([
   'admin',
@@ -14,7 +15,7 @@ const INSECURE_PASSWORDS = new Set([
 ])
 
 export async function GET() {
-  return NextResponse.json({ needsSetup: needsFirstTimeSetup() })
+  return NextResponse.json({ needsSetup: needsFirstTimeSetup(), authV2: isAuthV2Enabled() })
 }
 
 export async function POST(request: Request) {

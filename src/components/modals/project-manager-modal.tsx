@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react'
 import { useFocusTrap } from '@/lib/use-focus-trap'
+import { formatEnumLabel } from '@/lib/format-enum-label'
 import { Button } from '@/components/ui/button'
 
 interface Project {
@@ -282,7 +283,7 @@ export function ProjectManagerModal({
                           )}
                         </div>
                         <div className="text-xs text-muted-foreground">
-                          {project.ticket_prefix} &middot; {project.slug} &middot; {project.status}
+                          {project.ticket_prefix} &middot; {project.slug} &middot; {formatEnumLabel(project.status)}
                           {project.github_repo && <> &middot; {project.github_repo}</>}
                         </div>
                       </div>

@@ -67,6 +67,7 @@ function initializeSchema() {
   try {
     runMigrations(db);
     seedAdminUserFromEnv(db);
+    warnOnExtraLocalAdmins(db);
 
     // Initialize webhook event listener (once)
     if (!webhookListenerInitialized) {
@@ -76,16 +77,6 @@ function initializeSchema() {
       }).catch(() => {
         // Silent - webhooks are optional
       });
-
-      // Start built-in scheduler for runtime installs only.
-      // Skip during `next build` and E2E/test mode to keep startup deterministic.
-      if (!isBuildPhase && !isTestMode) {
-        import('./scheduler').then(({ initScheduler }) => {
-          initScheduler();
-        }).catch(() => {
-          // Silent - scheduler is optional
-        });
-      }
     }
 
     if (!isBuildPhase) {
@@ -172,6 +163,32 @@ function seedAdminUserFromEnv(dbConn: Database.Database): void {
   `).run(username, displayName, hashPassword(password), 'admin')
 
   logger.info(`Seeded admin user: ${username}`)
+}
+
+/**
+ * Audit-time warning: more than one local admin in the system is a
+ * break-glass anti-pattern. Allowed (Endava ops may need a recovery
+ * account if Microsoft SSO breaks) but should be visible in startup logs.
+ */
+function warnOnExtraLocalAdmins(dbConn: Database.Database): void {
+  if (process.env.NEXT_PHASE === 'phase-production-build') return
+  try {
+    const cols = dbConn.prepare(`PRAGMA table_info(users)`).all() as Array<{ name: string }>
+    const hasProvider = cols.some((c) => c.name === 'provider')
+    const sql = hasProvider
+      ? `SELECT COUNT(*) as count FROM users WHERE role = 'admin' AND COALESCE(provider, 'local') = 'local'`
+      : `SELECT COUNT(*) as count FROM users WHERE role = 'admin'`
+    const row = dbConn.prepare(sql).get() as CountRow
+    if (row.count > 1) {
+      logger.warn(
+        `${row.count} local admin accounts detected. Local admins are intended for ` +
+        `bootstrap and break-glass recovery only — verify each is still required and ` +
+        `revoke unused accounts.`
+      )
+    }
+  } catch {
+    // table may not exist yet during fresh init — non-fatal
+  }
 }
 
 /**

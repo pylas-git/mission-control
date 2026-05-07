@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useTranslations } from 'next-intl'
 import { Button } from '@/components/ui/button'
+import { formatEnumLabel } from '@/lib/format-enum-label'
 import { useSmartPoll } from '@/lib/use-smart-poll'
 
 interface AuditEvent {
@@ -162,10 +163,10 @@ export function AuditTrailPanel() {
 
   function formatDetail(event: AuditEvent): string | null {
     if (!event.detail) return null
-    if (event.action === 'user_create') return `${t('detailUsername')}: ${event.detail.username}, ${t('detailRole')}: ${event.detail.role}`
+    if (event.action === 'user_create') return `${t('detailUsername')}: ${event.detail.username}, ${t('detailRole')}: ${formatEnumLabel(event.detail.role)}`
     if (event.action === 'user_update') {
       const parts: string[] = []
-      if (event.detail.role) parts.push(`${t('detailRole')}: ${event.detail.role}`)
+      if (event.detail.role) parts.push(`${t('detailRole')}: ${formatEnumLabel(event.detail.role)}`)
       if (event.detail.display_name) parts.push(`${t('detailName')}: ${event.detail.display_name}`)
       if (event.detail.password_changed) parts.push(t('detailPasswordReset'))
       return parts.join(', ')

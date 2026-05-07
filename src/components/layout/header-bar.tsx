@@ -4,12 +4,10 @@ import { useState, useRef, useEffect, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import { useTranslations } from 'next-intl'
 import { useMissionControl, type ConnectionStatus } from '@/store'
-import { extractWsHost } from '@/lib/agent-card-helpers'
 import { useWebSocket } from '@/lib/websocket'
 import { useNavigateToPanel, usePrefetchPanel } from '@/lib/navigation'
 import { Button } from '@/components/ui/button'
 import { ThemeSelector } from '@/components/ui/theme-selector'
-import { LanguageSwitcher } from '@/components/ui/language-switcher'
 import { DigitalClock } from '@/components/ui/digital-clock'
 import { getNavigationMetrics, navigationMetricEventName } from '@/lib/navigation-metrics'
 
@@ -379,7 +377,6 @@ export function HeaderBar() {
             )}
           </Button>
 
-          <LanguageSwitcher />
           <ThemeSelector />
         </div>
       </div>
@@ -463,16 +460,21 @@ function ModeBadge({
   connection: ConnectionStatus
   onReconnect: () => void
 }) {
-  const { dashboardMode } = useMissionControl()
+  const { dashboardMode, currentUser } = useMissionControl()
   const th = useTranslations('header')
   const isLocal = dashboardMode === 'local'
   const [showTooltip, setShowTooltip] = useState(false)
+
+  const roleName = currentUser?.role || 'user'
+  const regionLabel = roleName === 'admin' || roleName === 'global_champion'
+    ? 'Global'
+    : ((currentUser as { region_name?: string | null })?.region_name || 'Unassigned')
 
   if (isLocal) {
     return (
       <div className="flex items-center gap-1.5 px-2 py-1 rounded-md text-2xs bg-void-cyan/10 border border-void-cyan/25">
         <span className="w-1.5 h-1.5 rounded-full bg-void-cyan" />
-        <span className="font-medium text-void-cyan">{th('local')}</span>
+        <span className="font-medium text-void-cyan">{regionLabel}</span>
       </div>
     )
   }
@@ -502,7 +504,7 @@ function ModeBadge({
     statusLabel = th('offline')
   }
 
-  const wsHost = extractWsHost(connection.url)
+  const wsHost = (() => { try { return connection.url ? new URL(connection.url).host : '' } catch { return '' } })()
 
   return (
     <div

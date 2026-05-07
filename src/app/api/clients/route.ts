@@ -1,0 +1,196 @@
+/**
+ * Clients API — list/create.
+ *
+ * Read: any authenticated user (filtered by region scope for RSC).
+ * Create: admin, global_champion, or regional_champion (own region only).
+ */
+
+import { NextRequest, NextResponse } from 'next/server'
+import { z } from 'zod'
+import { getDatabase, logAuditEvent } from '@/lib/db'
+import { getUserFromRequest } from '@/lib/auth'
+import { canManageRegion, normalizeRole, getUserRegionId } from '@/lib/authz'
+import { validateBody } from '@/lib/validation'
+import { mutationLimiter } from '@/lib/rate-limit'
+import { logger } from '@/lib/logger'
+
+const slugify = (s: string) =>
+  s.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64)
+
+const createClientSchema = z.object({
+  region_id: z.number().int().positive(),
+  name: z.string().min(1).max(150),
+  slug: z.string().min(1).max(64).regex(/^[a-z0-9-]+$/).optional(),
+})
+
+const updateClientSchema = z.object({
+  id: z.number().int().positive(),
+  name: z.string().min(1).max(150).optional(),
+  slug: z.string().min(1).max(64).regex(/^[a-z0-9-]+$/).optional(),
+})
+
+const deleteClientSchema = z.object({
+  id: z.number().int().positive(),
+})
+
+interface ClientRow {
+  id: number; region_id: number; name: string; slug: string;
+  created_at: number; updated_at: number;
+}
+
+export async function GET(request: NextRequest) {
+  const user = getUserFromRequest(request)
+  if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+  const db = getDatabase()
+  const role = normalizeRole(user.role)
+  let rows: ClientRow[]
+  if (role === 'admin' || role === 'global_champion') {
+    rows = db.prepare(`SELECT * FROM escp_clients ORDER BY name`).all() as ClientRow[]
+  } else if (role === 'regional_champion') {
+    const regionId = getUserRegionId(user.id)
+    if (!regionId) return NextResponse.json({ clients: [] })
+    rows = db.prepare(`SELECT * FROM escp_clients WHERE region_id = ? ORDER BY name`).all(regionId) as ClientRow[]
+  } else {
+    // security_champion: only clients of projects they're assigned to
+    rows = db.prepare(`
+      SELECT DISTINCT c.* FROM escp_clients c
+      JOIN escp_projects p ON p.client_id = c.id
+      JOIN escp_project_champions pc ON pc.project_id = p.id
+      WHERE pc.user_id = ?
+      ORDER BY c.name
+    `).all(user.id) as ClientRow[]
+  }
+  return NextResponse.json({ clients: rows })
+}
+
+export async function POST(request: NextRequest) {
+  const user = getUserFromRequest(request)
+  if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+  const rateCheck = mutationLimiter(request)
+  if (rateCheck) return rateCheck
+
+  const result = await validateBody(request, createClientSchema)
+  if ('error' in result) return result.error
+  const { region_id, name } = result.data
+  const slug = result.data.slug || slugify(name)
+  if (!slug) return NextResponse.json({ error: 'Invalid slug' }, { status: 400 })
+
+  if (!canManageRegion(user, region_id)) {
+    return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+  }
+
+  try {
+    const db = getDatabase()
+    const insert = db.prepare(`
+      INSERT INTO escp_clients (region_id, name, slug) VALUES (?, ?, ?)
+    `).run(region_id, name, slug)
+    const id = Number(insert.lastInsertRowid)
+    logAuditEvent({
+      action: 'client_create', actor: user.username, actor_id: user.id,
+      target_type: 'client', target_id: id,
+      detail: { region_id, name, slug }, ip_address: request.headers.get('x-real-ip') || 'unknown',
+    })
+    return NextResponse.json({ client: { id, region_id, name, slug } }, { status: 201 })
+  } catch (err: unknown) {
+    if ((err as { message?: string }).message?.includes('UNIQUE')) {
+      return NextResponse.json({ error: 'Client slug already exists in this region' }, { status: 409 })
+    }
+    logger.error({ err }, 'POST /api/clients failed')
+    return NextResponse.json({ error: 'Failed to create client' }, { status: 500 })
+  }
+}
+
+export async function PUT(request: NextRequest) {
+  const user = getUserFromRequest(request)
+  if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+  const rateCheck = mutationLimiter(request)
+  if (rateCheck) return rateCheck
+
+  const result = await validateBody(request, updateClientSchema)
+  if ('error' in result) return result.error
+
+  const { id, name, slug } = result.data
+  if (!name && !slug) {
+    return NextResponse.json({ error: 'No fields to update' }, { status: 400 })
+  }
+
+  const db = getDatabase()
+  const existing = db.prepare(`SELECT id, region_id, name FROM escp_clients WHERE id = ?`).get(id) as {
+    id: number
+    region_id: number
+    name: string
+  } | undefined
+  if (!existing) return NextResponse.json({ error: 'Client not found' }, { status: 404 })
+  if (!canManageRegion(user, existing.region_id)) {
+    return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+  }
+
+  const nextName = name ?? existing.name
+  const nextSlug = slug || (name ? slugify(name) : undefined)
+
+  try {
+    db.prepare(`
+      UPDATE escp_clients
+      SET name = ?, slug = COALESCE(?, slug), updated_at = strftime('%s','now')
+      WHERE id = ?
+    `).run(nextName, nextSlug, id)
+
+    logAuditEvent({
+      action: 'client_update', actor: user.username, actor_id: user.id,
+      target_type: 'client', target_id: id,
+      detail: { name: nextName, slug: nextSlug }, ip_address: request.headers.get('x-real-ip') || 'unknown',
+    })
+
+    return NextResponse.json({ client: { id, region_id: existing.region_id, name: nextName, slug: nextSlug } })
+  } catch (err: unknown) {
+    if ((err as { message?: string }).message?.includes('UNIQUE')) {
+      return NextResponse.json({ error: 'Client slug already exists in this region' }, { status: 409 })
+    }
+    logger.error({ err }, 'PUT /api/clients failed')
+    return NextResponse.json({ error: 'Failed to update client' }, { status: 500 })
+  }
+}
+
+export async function DELETE(request: NextRequest) {
+  const user = getUserFromRequest(request)
+  if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+  const rateCheck = mutationLimiter(request)
+  if (rateCheck) return rateCheck
+
+  const result = await validateBody(request, deleteClientSchema)
+  if ('error' in result) return result.error
+
+  const { id } = result.data
+  const db = getDatabase()
+  const existing = db.prepare(`SELECT id, region_id FROM escp_clients WHERE id = ?`).get(id) as {
+    id: number
+    region_id: number
+  } | undefined
+  if (!existing) return NextResponse.json({ error: 'Client not found' }, { status: 404 })
+  if (!canManageRegion(user, existing.region_id)) {
+    return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+  }
+
+  try {
+    const del = db.prepare(`DELETE FROM escp_clients WHERE id = ?`).run(id)
+    if (del.changes === 0) return NextResponse.json({ error: 'Client not found' }, { status: 404 })
+
+    logAuditEvent({
+      action: 'client_delete', actor: user.username, actor_id: user.id,
+      target_type: 'client', target_id: id,
+      detail: {}, ip_address: request.headers.get('x-real-ip') || 'unknown',
+    })
+
+    return NextResponse.json({ success: true })
+  } catch (err: unknown) {
+    if ((err as { message?: string }).message?.includes('FOREIGN KEY')) {
+      return NextResponse.json({ error: 'Cannot delete account with existing projects' }, { status: 409 })
+    }
+    logger.error({ err }, 'DELETE /api/clients failed')
+    return NextResponse.json({ error: 'Failed to delete client' }, { status: 500 })
+  }
+}

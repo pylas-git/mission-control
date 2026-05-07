@@ -1428,6 +1428,173 @@ const migrations: Migration[] = [
       db.exec(`ALTER TABLE mcp_call_log ADD COLUMN signature TEXT DEFAULT NULL`)
       db.exec(`ALTER TABLE mcp_call_log ADD COLUMN public_key TEXT DEFAULT NULL`)
     }
+  },
+  {
+    // ESCP auth v2: hierarchical security-champion domain + Microsoft SSO support.
+    // Additive only; legacy auth plumbing left intact behind AUTH_V2 feature flag.
+    id: '051_escp_auth_v2',
+    up(db: Database.Database) {
+      // Region -> Client -> Project hierarchy (ESCP-specific, distinct from
+      // the legacy task-orchestration `projects` table which is now dormant).
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS escp_regions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT NOT NULL UNIQUE,
+          slug TEXT NOT NULL UNIQUE,
+          created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+        );
+        CREATE TABLE IF NOT EXISTS escp_clients (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          region_id INTEGER NOT NULL,
+          name TEXT NOT NULL,
+          slug TEXT NOT NULL,
+          created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          UNIQUE(region_id, slug),
+          FOREIGN KEY (region_id) REFERENCES escp_regions(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_escp_clients_region ON escp_clients(region_id);
+
+        CREATE TABLE IF NOT EXISTS escp_projects (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          client_id INTEGER NOT NULL,
+          name TEXT NOT NULL,
+          slug TEXT NOT NULL,
+          archived_at INTEGER,
+          created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          UNIQUE(client_id, slug),
+          FOREIGN KEY (client_id) REFERENCES escp_clients(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_escp_projects_client ON escp_projects(client_id);
+
+        CREATE TABLE IF NOT EXISTS escp_project_champions (
+          project_id INTEGER NOT NULL,
+          user_id INTEGER NOT NULL,
+          assigned_by INTEGER,
+          assigned_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          PRIMARY KEY (project_id, user_id),
+          FOREIGN KEY (project_id) REFERENCES escp_projects(id) ON DELETE CASCADE,
+          FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_escp_project_champions_user ON escp_project_champions(user_id);
+
+        -- Invite-only access: every non-bootstrap user must have a pending
+        -- invitation that gets consumed on first Microsoft SSO sign-in.
+        CREATE TABLE IF NOT EXISTS escp_invitations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          email TEXT NOT NULL,
+          role TEXT NOT NULL,
+          region_id INTEGER,
+          intended_project_ids TEXT,
+          token_hash TEXT NOT NULL UNIQUE,
+          invited_by INTEGER,
+          created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          expires_at INTEGER NOT NULL,
+          accepted_at INTEGER,
+          accepted_user_id INTEGER,
+          revoked_at INTEGER,
+          revoked_by INTEGER,
+          FOREIGN KEY (region_id) REFERENCES escp_regions(id) ON DELETE SET NULL,
+          FOREIGN KEY (invited_by) REFERENCES users(id) ON DELETE RESTRICT,
+          FOREIGN KEY (accepted_user_id) REFERENCES users(id) ON DELETE SET NULL,
+          FOREIGN KEY (revoked_by) REFERENCES users(id) ON DELETE SET NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_escp_invitations_email ON escp_invitations(email);
+        CREATE INDEX IF NOT EXISTS idx_escp_invitations_pending
+          ON escp_invitations(email)
+          WHERE accepted_at IS NULL AND revoked_at IS NULL;
+      `)
+
+      // Extend users table for Microsoft Entra ID + region scope.
+      // The legacy CHECK on `role` (admin|operator|viewer) is dropped by adding
+      // new role values via app-level validation; sqlite has no easy ALTER CHECK,
+      // so we keep the column TEXT and validate in code (src/lib/authz.ts).
+      const userCols = db.prepare(`PRAGMA table_info(users)`).all() as Array<{ name: string }>
+      const hasUserCol = (name: string) => userCols.some((c) => c.name === name)
+      if (!hasUserCol('entra_object_id')) {
+        db.exec(`ALTER TABLE users ADD COLUMN entra_object_id TEXT`)
+        db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_entra_object_id ON users(entra_object_id) WHERE entra_object_id IS NOT NULL`)
+      }
+      if (!hasUserCol('entra_tenant_id')) {
+        db.exec(`ALTER TABLE users ADD COLUMN entra_tenant_id TEXT`)
+      }
+      if (!hasUserCol('region_id')) {
+        db.exec(`ALTER TABLE users ADD COLUMN region_id INTEGER REFERENCES escp_regions(id) ON DELETE SET NULL`)
+      }
+
+      // Seed default Endava regions; admin can edit later via UI.
+      const seedRegion = db.prepare(`
+        INSERT OR IGNORE INTO escp_regions (name, slug) VALUES (?, ?)
+      `)
+      seedRegion.run('EMEA', 'emea')
+      seedRegion.run('AMER', 'amer')
+      seedRegion.run('APAC', 'apac')
+      seedRegion.run('LATAM', 'latam')
+    }
+  },
+  {
+    id: '052_better_auth_tables',
+    up: (db) => {
+      // Better Auth (AUTH_V2) requires these four tables for its internal
+      // session / account / verification token storage.
+      // The `user` table here is Better Auth's own user store (OAuth profile
+      // data). Our app's canonical users remain in the `users` table; they
+      // are linked by email in the databaseHooks.user.create hook.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS "user" (
+          id TEXT PRIMARY KEY NOT NULL,
+          name TEXT NOT NULL,
+          email TEXT NOT NULL UNIQUE,
+          emailVerified INTEGER NOT NULL DEFAULT 0,
+          image TEXT,
+          createdAt INTEGER NOT NULL DEFAULT (unixepoch()),
+          updatedAt INTEGER NOT NULL DEFAULT (unixepoch())
+        );
+
+        CREATE TABLE IF NOT EXISTS "session" (
+          id TEXT PRIMARY KEY NOT NULL,
+          expiresAt INTEGER NOT NULL,
+          token TEXT NOT NULL UNIQUE,
+          createdAt INTEGER NOT NULL DEFAULT (unixepoch()),
+          updatedAt INTEGER NOT NULL DEFAULT (unixepoch()),
+          ipAddress TEXT,
+          userAgent TEXT,
+          userId TEXT NOT NULL REFERENCES "user"(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS "account" (
+          id TEXT PRIMARY KEY NOT NULL,
+          accountId TEXT NOT NULL,
+          providerId TEXT NOT NULL,
+          userId TEXT NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
+          accessToken TEXT,
+          refreshToken TEXT,
+          idToken TEXT,
+          accessTokenExpiresAt INTEGER,
+          refreshTokenExpiresAt INTEGER,
+          scope TEXT,
+          password TEXT,
+          createdAt INTEGER NOT NULL DEFAULT (unixepoch()),
+          updatedAt INTEGER NOT NULL DEFAULT (unixepoch())
+        );
+
+        CREATE TABLE IF NOT EXISTS "verification" (
+          id TEXT PRIMARY KEY NOT NULL,
+          identifier TEXT NOT NULL,
+          value TEXT NOT NULL,
+          expiresAt INTEGER NOT NULL,
+          createdAt INTEGER NOT NULL DEFAULT (unixepoch()),
+          updatedAt INTEGER NOT NULL DEFAULT (unixepoch())
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_session_userId ON "session"(userId);
+        CREATE INDEX IF NOT EXISTS idx_account_userId ON "account"(userId);
+        CREATE INDEX IF NOT EXISTS idx_account_providerId_accountId ON "account"(providerId, accountId);
+        CREATE INDEX IF NOT EXISTS idx_verification_identifier ON "verification"(identifier);
+      `)
+    }
   }
 ]
 

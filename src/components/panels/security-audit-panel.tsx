@@ -5,6 +5,7 @@ import { useTranslations } from 'next-intl'
 import { Button } from '@/components/ui/button'
 import { Loader } from '@/components/ui/loader'
 import { useMissionControl } from '@/store'
+import { formatEnumLabel } from '@/lib/format-enum-label'
 import { useSmartPoll } from '@/lib/use-smart-poll'
 import { useNavigateToPanel } from '@/lib/navigation'
 import {
@@ -461,7 +462,7 @@ export function SecurityAuditPanel() {
                               : evt.type === 'token_rotation' ? 'bg-blue-500/15 text-blue-400'
                               : 'bg-muted text-muted-foreground'
                             }`}>
-                              {evt.type.replace(/_/g, ' ')}
+                              {formatEnumLabel(evt.type)}
                             </span>
                           </td>
                           <td className="py-1.5 pr-3 text-foreground">{evt.actor}</td>

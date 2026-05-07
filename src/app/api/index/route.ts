@@ -23,10 +23,6 @@ const endpoints: Endpoint[] = [
 
   // ── Projects ──────────────────────────────────────
   { path: '/api/workspaces', methods: ['GET'], description: 'Tenant-scoped workspace listing', tag: 'Projects', auth: 'viewer' },
-  { path: '/api/projects', methods: ['GET', 'POST'], description: 'Project CRUD — list, create', tag: 'Projects', auth: 'viewer/operator' },
-  { path: '/api/projects/:id', methods: ['GET', 'PATCH', 'DELETE'], description: 'Project detail — read, update, archive/delete', tag: 'Projects', auth: 'viewer/operator/admin' },
-  { path: '/api/projects/:id/tasks', methods: ['GET'], description: 'Tasks scoped to project', tag: 'Projects', auth: 'viewer' },
-  { path: '/api/projects/:id/agents', methods: ['GET', 'POST', 'DELETE'], description: 'Project agent assignments — list, assign, unassign', tag: 'Projects', auth: 'viewer/operator' },
 
   // ── Agents ────────────────────────────────────────
   { path: '/api/agents', methods: ['GET', 'POST'], description: 'Agent CRUD — list, register', tag: 'Agents', auth: 'viewer/operator' },
@@ -80,12 +76,23 @@ const endpoints: Endpoint[] = [
   { path: '/api/alerts', methods: ['GET', 'POST', 'PATCH', 'DELETE'], description: 'Alert rules CRUD', tag: 'Alerts', auth: 'viewer/operator' },
 
   // ── Auth ──────────────────────────────────────────
-  { path: '/api/auth/login', methods: ['POST'], description: 'User login', tag: 'Auth', auth: 'public' },
+  { path: '/api/auth/login', methods: ['POST'], description: 'Local user login (bootstrap admin + break-glass only)', tag: 'Auth', auth: 'public' },
   { path: '/api/auth/logout', methods: ['POST'], description: 'User logout', tag: 'Auth', auth: 'authenticated' },
   { path: '/api/auth/me', methods: ['GET'], description: 'Current user info', tag: 'Auth', auth: 'authenticated' },
   { path: '/api/auth/users', methods: ['GET', 'POST', 'PATCH', 'DELETE'], description: 'User management', tag: 'Auth', auth: 'admin' },
-  { path: '/api/auth/google', methods: ['POST'], description: 'Google OAuth callback', tag: 'Auth', auth: 'public' },
-  { path: '/api/auth/access-requests', methods: ['GET', 'PATCH'], description: 'Access request approvals', tag: 'Auth', auth: 'admin' },
+  { path: '/api/auth/v2/*', methods: ['GET', 'POST'], description: 'Better Auth handler (Microsoft Entra SSO; AUTH_V2 flag required)', tag: 'Auth', auth: 'public' },
+  { path: '/api/auth/google', methods: ['POST'], description: 'Google OAuth callback (legacy; deprecated by AUTH_V2)', tag: 'Auth', auth: 'public' },
+  { path: '/api/auth/access-requests', methods: ['GET', 'PATCH'], description: 'Access request approvals (legacy; deprecated by /api/invitations)', tag: 'Auth', auth: 'admin' },
+
+  // ── Invitations (ESCP) ────────────────────────────
+  { path: '/api/invitations', methods: ['GET', 'POST'], description: 'Invitation list and create — invite-only access for SSO sign-ins', tag: 'Invitations', auth: 'admin/global_champion/regional_champion' },
+  { path: '/api/invitations/:id', methods: ['DELETE'], description: 'Revoke a pending invitation', tag: 'Invitations', auth: 'admin/global_champion/regional_champion' },
+
+  // ── ESCP Domain (Region → Client → Project) ───────
+  { path: '/api/regions', methods: ['GET', 'POST'], description: 'Region CRUD — list, create', tag: 'ESCP', auth: 'authenticated/global_champion' },
+  { path: '/api/clients', methods: ['GET', 'POST'], description: 'Client CRUD — list (region-scoped), create', tag: 'ESCP', auth: 'authenticated/regional_champion' },
+  { path: '/api/projects', methods: ['GET', 'POST'], description: 'Project CRUD — list (role-scoped), create', tag: 'ESCP', auth: 'authenticated/regional_champion' },
+  { path: '/api/projects/:id/champions', methods: ['GET', 'POST', 'DELETE'], description: 'Project champion assignments', tag: 'ESCP', auth: 'authenticated/regional_champion' },
 
   // ── Tokens & Costs ────────────────────────────────
   { path: '/api/tokens', methods: ['GET', 'POST'], description: 'Token usage tracking', tag: 'Tokens', auth: 'viewer/operator' },
@@ -122,14 +129,6 @@ const endpoints: Endpoint[] = [
   // ── GitHub ────────────────────────────────────────
   { path: '/api/github', methods: ['GET', 'POST'], description: 'GitHub issue sync', tag: 'GitHub', auth: 'viewer/operator' },
 
-  // ── Super Admin ───────────────────────────────────
-  { path: '/api/super/tenants', methods: ['GET', 'POST', 'PATCH', 'DELETE'], description: 'Tenant management', tag: 'Super Admin', auth: 'admin' },
-  { path: '/api/super/tenants/:id/decommission', methods: ['POST'], description: 'Decommission tenant', tag: 'Super Admin', auth: 'admin' },
-  { path: '/api/super/provision-jobs', methods: ['GET', 'POST'], description: 'Provision job management', tag: 'Super Admin', auth: 'admin' },
-  { path: '/api/super/provision-jobs/:id', methods: ['GET'], description: 'Provision job detail', tag: 'Super Admin', auth: 'admin' },
-  { path: '/api/super/provision-jobs/:id/run', methods: ['POST'], description: 'Execute provision job', tag: 'Super Admin', auth: 'admin' },
-  { path: '/api/super/os-users', methods: ['GET'], description: 'OS user listing', tag: 'Super Admin', auth: 'admin' },
-
   // ── System ────────────────────────────────────────
   { path: '/api/status', methods: ['GET'], description: 'System status & capabilities', tag: 'System', auth: 'public' },
   { path: '/api/audit', methods: ['GET'], description: 'Audit trail', tag: 'System', auth: 'admin' },
@@ -138,7 +137,7 @@ const endpoints: Endpoint[] = [
   { path: '/api/export', methods: ['GET'], description: 'Data export', tag: 'System', auth: 'viewer' },
   { path: '/api/workload', methods: ['GET'], description: 'Agent workload stats', tag: 'System', auth: 'viewer' },
   { path: '/api/releases/check', methods: ['GET'], description: 'Check for updates', tag: 'System', auth: 'public' },
-  { path: '/api/releases/update', methods: ['POST'], description: 'Update Mission Control to a specific release tag', tag: 'System', auth: 'admin' },
+  { path: '/api/releases/update', methods: ['POST'], description: 'Update Endava Security Champion Program to a specific release tag', tag: 'System', auth: 'admin' },
   { path: '/api/openclaw/version', methods: ['GET'], description: 'Installed OpenClaw version and latest release metadata', tag: 'System', auth: 'public' },
   { path: '/api/openclaw/update', methods: ['POST'], description: 'Update OpenClaw to the latest stable release', tag: 'System', auth: 'admin' },
   { path: '/api/openclaw/doctor', methods: ['GET', 'POST'], description: 'Inspect and fix OpenClaw configuration drift', tag: 'System', auth: 'admin' },

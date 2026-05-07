@@ -10,7 +10,6 @@ import { useMissionControl } from '@/store'
 import { useNavigateToPanel } from '@/lib/navigation'
 import { clampWizardStep, getWizardSteps, stepIdAt } from '@/lib/onboarding-flow'
 import { SecurityScanCard } from '@/components/onboarding/security-scan-card'
-// StepAgentRuntimes removed — runtime management moved to Settings page
 import { clearOnboardingReplayFromStart, markOnboardingDismissedThisSession, readOnboardingReplayFromStart } from '@/lib/onboarding-session'
 
 interface StepInfo {
@@ -23,12 +22,6 @@ interface OnboardingState {
   showOnboarding: boolean
   currentStep: number
   steps: StepInfo[]
-}
-
-interface DiagSecurityCheck {
-  name: string
-  pass: boolean
-  detail: string
 }
 
 interface DashboardRegistration {
@@ -48,8 +41,10 @@ interface RuntimeStatusInfo {
 }
 
 interface SystemCapabilities {
-  claudeSessions: number
-  agentCount: number
+  dbConnected: boolean
+  authenticationConfigured: boolean
+  apiKeyConfigured: boolean
+  emailServiceConfigured: boolean
   gatewayConnected: boolean
   hasSkills: boolean
   dashboardRegistration: DashboardRegistration | null
@@ -77,8 +72,10 @@ export function OnboardingWizard() {
   const [runtimeStatuses, setRuntimeStatuses] = useState<RuntimeStatusInfo[]>([])
   const [runtimesLoading, setRuntimesLoading] = useState(true)
   const [capabilities, setCapabilities] = useState<SystemCapabilities>({
-    claudeSessions: 0,
-    agentCount: 0,
+    dbConnected: false,
+    authenticationConfigured: false,
+    apiKeyConfigured: false,
+    emailServiceConfigured: false,
     gatewayConnected: false,
     hasSkills: false,
     dashboardRegistration: null,
@@ -114,16 +111,16 @@ export function OnboardingWizard() {
     // Fetch system capabilities and runtime status in parallel
     Promise.allSettled([
       fetch('/api/status?action=capabilities').then(r => r.ok ? r.json() : null),
-      fetch('/api/agents?limit=1').then(r => r.ok ? r.json() : null),
       fetch('/api/agent-runtimes').then(r => r.ok ? r.json() : null),
-    ]).then(([statusResult, agentsResult, runtimesResult]) => {
+    ]).then(([statusResult, runtimesResult]) => {
       const statusData = statusResult.status === 'fulfilled' ? statusResult.value : null
-      const agentsData = agentsResult.status === 'fulfilled' ? agentsResult.value : null
       const runtimesData = runtimesResult.status === 'fulfilled' ? runtimesResult.value : null
       setCapabilities({
-        claudeSessions: statusData?.claudeSessions ?? 0,
+        dbConnected: statusData?.dbConnected ?? false,
+        authenticationConfigured: statusData?.authenticationConfigured ?? false,
+        apiKeyConfigured: statusData?.apiKeyConfigured ?? false,
+        emailServiceConfigured: statusData?.emailServiceConfigured ?? false,
         gatewayConnected: statusData?.gateway ?? false,
-        agentCount: agentsData?.total ?? 0,
         hasSkills: false,
         dashboardRegistration: statusData?.dashboardRegistration ?? null,
       })
@@ -147,18 +144,21 @@ export function OnboardingWizard() {
 
   useEffect(() => {
     if (step !== credentialsStepIndex || credentialStatus) return
-    fetch('/api/diagnostics')
+    fetch('/api/status?action=capabilities')
       .then(r => r.ok ? r.json() : null)
-      .then(data => {
-        if (data?.security?.checks) {
-          const checks = data.security.checks as DiagSecurityCheck[]
-          const authOk = checks.find(c => c.name === 'Auth password secure')?.pass ?? false
-          const apiKeyOk = checks.find(c => c.name === 'API key configured')?.pass ?? false
-          setCredentialStatus({ authOk, apiKeyOk })
-        }
+      .then((data) => {
+        setCredentialStatus({
+          authOk: data?.authenticationConfigured ?? capabilities.authenticationConfigured,
+          apiKeyOk: data?.apiKeyConfigured ?? capabilities.apiKeyConfigured,
+        })
       })
-      .catch(() => {})
-  }, [step, credentialStatus, credentialsStepIndex])
+      .catch(() => {
+        setCredentialStatus({
+          authOk: capabilities.authenticationConfigured,
+          apiKeyOk: capabilities.apiKeyConfigured,
+        })
+      })
+  }, [step, credentialStatus, credentialsStepIndex, capabilities.authenticationConfigured, capabilities.apiKeyConfigured])
 
   const completeStep = useCallback(async (stepId: string) => {
     await fetch('/api/onboarding', {
@@ -241,7 +241,7 @@ export function OnboardingWizard() {
       <div
         role="dialog"
         aria-modal="true"
-        aria-label="Mission Control onboarding"
+        aria-label="Endava Security Champion Program onboarding"
         className="relative z-10 my-auto w-full max-w-3xl bg-background border border-border/50 rounded-lg sm:rounded-xl shadow-2xl overflow-hidden flex max-h-[calc(100dvh-1rem)] sm:max-h-[85vh] flex-col"
       >
         {/* Progress bar */}
@@ -292,7 +292,6 @@ export function OnboardingWizard() {
           {STEPS[step]?.id === 'gateway-link' && (
             <StepGatewayLink isGateway={isGateway} registration={capabilities.dashboardRegistration} onNext={goNext} onBack={goBack} />
           )}
-          {/* agent-runtimes step removed — runtime management via Settings */}
           {STEPS[step]?.id === 'credentials' && (
             <StepCredentials isGateway={isGateway} status={credentialStatus} onFinish={finish} onBack={goBack} navigateToPanel={navigateToPanel} onClose={skip} />
           )}
@@ -324,15 +323,15 @@ function StepWelcome({ isGateway, capabilities, runtimeStatuses, runtimesLoading
         <div className="w-14 h-14 rounded-xl overflow-hidden bg-surface-1 border border-border/50 flex items-center justify-center shadow-lg">
           <Image
             src="/brand/mc-logo-128.png"
-            alt="Mission Control"
+            alt="Endava Security Champion Program"
             width={56}
             height={56}
             className="w-full h-full object-cover"
           />
         </div>
-        <div>
-          <h2 className="text-xl font-semibold mb-2">{t('title')}</h2>
-          <p className="text-sm text-muted-foreground max-w-sm">
+        <div className="w-full max-w-xl mx-auto">
+          <h2 className="text-xl font-semibold mb-2 text-balance">{t('title')}</h2>
+          <p className="text-sm text-muted-foreground max-w-md mx-auto leading-relaxed text-balance">
             {t('description')}
           </p>
         </div>
@@ -404,20 +403,16 @@ function StepWelcome({ isGateway, capabilities, runtimeStatuses, runtimesLoading
         {/* Live status chips */}
         <div className="flex flex-wrap items-center justify-center gap-2">
           <StatusChip
-            ok={capabilities.claudeSessions > 0}
-            label={capabilities.claudeSessions > 0
-              ? t('activeSessionsDetected', { count: capabilities.claudeSessions })
-              : t('noActiveSessions')}
+            ok={capabilities.dbConnected}
+            label={capabilities.dbConnected ? t('dbConnected') : t('dbUnavailable')}
           />
           <StatusChip
-            ok={capabilities.gatewayConnected}
-            label={capabilities.gatewayConnected ? t('gatewayConnected') : t('localModeNoGateway')}
+            ok={capabilities.emailServiceConfigured}
+            label={capabilities.emailServiceConfigured ? t('emailConfigured') : t('emailUnavailable')}
           />
           <StatusChip
-            ok={capabilities.agentCount > 0}
-            label={capabilities.agentCount > 0
-              ? t('agentsRegistered', { count: capabilities.agentCount })
-              : t('noAgentsYet')}
+            ok={capabilities.authenticationConfigured}
+            label={capabilities.authenticationConfigured ? t('authConfigured') : t('authNeedsSetup')}
           />
         </div>
       </div>
@@ -484,7 +479,7 @@ function StepInterfaceMode({ isGateway, onNext, onBack }: {
             }`}
           >
             {selected === 'essential' && (
-              <span className="absolute -top-2 right-2 text-2xs px-1.5 py-0.5 rounded-full bg-void-amber/20 text-void-amber border border-void-amber/30">
+              <span className="absolute top-2 right-2 text-2xs px-1.5 py-0.5 rounded-full bg-void-amber/20 text-void-amber border border-void-amber/30">
                 {tc('selected')}
               </span>
             )}
@@ -511,7 +506,7 @@ function StepInterfaceMode({ isGateway, onNext, onBack }: {
             }`}
           >
             {selected === 'full' && (
-              <span className="absolute -top-2 right-2 text-2xs px-1.5 py-0.5 rounded-full bg-void-cyan/20 text-void-cyan border border-void-cyan/30">
+              <span className="absolute top-2 right-2 text-2xs px-1.5 py-0.5 rounded-full bg-void-cyan/20 text-void-cyan border border-void-cyan/30">
                 {tc('selected')}
               </span>
             )}

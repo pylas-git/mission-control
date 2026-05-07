@@ -1,132 +1,216 @@
+/**
+ * Projects API — list/create.
+ *
+ * Read: admin/global_champion (all), regional_champion (own region),
+ *        security_champion (only projects they're assigned to).
+ * Create: admin, global_champion, regional_champion (own region only).
+ */
+
 import { NextRequest, NextResponse } from 'next/server'
-import { getDatabase } from '@/lib/db'
-import { requireRole } from '@/lib/auth'
+import { z } from 'zod'
+import { getDatabase, logAuditEvent } from '@/lib/db'
+import { getUserFromRequest } from '@/lib/auth'
+import { normalizeRole, getUserRegionId, canManageRegion } from '@/lib/authz'
+import { validateBody } from '@/lib/validation'
 import { mutationLimiter } from '@/lib/rate-limit'
 import { logger } from '@/lib/logger'
-import { ensureTenantWorkspaceAccess, ForbiddenError } from '@/lib/workspaces'
 
-function slugify(input: string): string {
-  return input
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 64)
+const slugify = (s: string) =>
+  s.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64)
+
+const createProjectSchema = z.object({
+  client_id: z.number().int().positive(),
+  name: z.string().min(1).max(150),
+  slug: z.string().min(1).max(64).regex(/^[a-z0-9-]+$/).optional(),
+})
+
+const updateProjectSchema = z.object({
+  id: z.number().int().positive(),
+  name: z.string().min(1).max(150).optional(),
+  slug: z.string().min(1).max(64).regex(/^[a-z0-9-]+$/).optional(),
+})
+
+const deleteProjectSchema = z.object({
+  id: z.number().int().positive(),
+})
+
+interface ProjectRow {
+  id: number; client_id: number; name: string; slug: string;
+  archived_at: number | null; created_at: number; updated_at: number;
+  client_name?: string; region_id?: number; region_name?: string;
 }
 
-function normalizePrefix(input: string): string {
-  const normalized = input.trim().toUpperCase().replace(/[^A-Z0-9]/g, '')
-  return normalized.slice(0, 12)
-}
+interface ClientLookupRow { region_id: number }
 
 export async function GET(request: NextRequest) {
-  const auth = requireRole(request, 'viewer')
-  if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
+  const user = getUserFromRequest(request)
+  if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-  try {
-    const db = getDatabase()
-    const workspaceId = auth.user.workspace_id ?? 1
-    const tenantId = auth.user.tenant_id ?? 1
-    const forwardedFor = (request.headers.get('x-forwarded-for') || '').split(',')[0]?.trim() || null
-    ensureTenantWorkspaceAccess(db, tenantId, workspaceId, {
-      actor: auth.user.username,
-      actorId: auth.user.id,
-      route: '/api/projects',
-      ipAddress: forwardedFor,
-      userAgent: request.headers.get('user-agent'),
-    })
-    const includeArchived = new URL(request.url).searchParams.get('includeArchived') === '1'
-
-    const rows = db.prepare(`
-      SELECT p.id, p.workspace_id, p.name, p.slug, p.description, p.ticket_prefix, p.ticket_counter, p.status,
-             p.github_repo, p.deadline, p.color, p.github_sync_enabled, p.github_labels_initialized, p.github_default_branch, p.created_at, p.updated_at,
-             (SELECT COUNT(*) FROM tasks t WHERE t.project_id = p.id) as task_count,
-             (SELECT GROUP_CONCAT(paa.agent_name) FROM project_agent_assignments paa WHERE paa.project_id = p.id) as assigned_agents_csv
-      FROM projects p
-      WHERE p.workspace_id = ?
-        ${includeArchived ? '' : "AND p.status = 'active'"}
-      ORDER BY p.name COLLATE NOCASE ASC
-    `).all(workspaceId) as Array<Record<string, unknown>>
-
-    const projects = rows.map(row => ({
-      ...row,
-      assigned_agents: row.assigned_agents_csv ? String(row.assigned_agents_csv).split(',') : [],
-      assigned_agents_csv: undefined,
-    }))
-
-    return NextResponse.json({ projects })
-  } catch (error) {
-    if (error instanceof ForbiddenError) {
-      return NextResponse.json({ error: error.message }, { status: error.status })
-    }
-    logger.error({ err: error }, 'GET /api/projects error')
-    return NextResponse.json({ error: 'Failed to fetch projects' }, { status: 500 })
+  const db = getDatabase()
+  const role = normalizeRole(user.role)
+  const baseSelect = `
+    SELECT p.*, c.name as client_name, c.region_id as region_id, r.name as region_name
+    FROM escp_projects p
+    JOIN escp_clients c ON c.id = p.client_id
+    JOIN escp_regions r ON r.id = c.region_id
+  `
+  let rows: ProjectRow[]
+  if (role === 'admin' || role === 'global_champion') {
+    rows = db.prepare(`${baseSelect} ORDER BY p.name`).all() as ProjectRow[]
+  } else if (role === 'regional_champion') {
+    const regionId = getUserRegionId(user.id)
+    if (!regionId) return NextResponse.json({ projects: [] })
+    rows = db.prepare(`${baseSelect} WHERE c.region_id = ? ORDER BY p.name`).all(regionId) as ProjectRow[]
+  } else {
+    rows = db.prepare(`
+      ${baseSelect}
+      JOIN escp_project_champions pc ON pc.project_id = p.id
+      WHERE pc.user_id = ?
+      ORDER BY p.name
+    `).all(user.id) as ProjectRow[]
   }
+  return NextResponse.json({ projects: rows })
 }
 
 export async function POST(request: NextRequest) {
-  const auth = requireRole(request, 'operator')
-  if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
+  const user = getUserFromRequest(request)
+  if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   const rateCheck = mutationLimiter(request)
   if (rateCheck) return rateCheck
 
+  const result = await validateBody(request, createProjectSchema)
+  if ('error' in result) return result.error
+  const { client_id, name } = result.data
+  const slug = result.data.slug || slugify(name)
+  if (!slug) return NextResponse.json({ error: 'Invalid slug' }, { status: 400 })
+
+  const db = getDatabase()
+  const client = db.prepare(`SELECT region_id FROM escp_clients WHERE id = ?`).get(client_id) as ClientLookupRow | undefined
+  if (!client) return NextResponse.json({ error: 'Client not found' }, { status: 404 })
+  if (!canManageRegion(user, client.region_id)) {
+    return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+  }
+
   try {
-    const db = getDatabase()
-    const workspaceId = auth.user.workspace_id ?? 1
-    const tenantId = auth.user.tenant_id ?? 1
-    const forwardedFor = (request.headers.get('x-forwarded-for') || '').split(',')[0]?.trim() || null
-    ensureTenantWorkspaceAccess(db, tenantId, workspaceId, {
-      actor: auth.user.username,
-      actorId: auth.user.id,
-      route: '/api/projects',
-      ipAddress: forwardedFor,
-      userAgent: request.headers.get('user-agent'),
+    const insert = db.prepare(`
+      INSERT INTO escp_projects (client_id, name, slug) VALUES (?, ?, ?)
+    `).run(client_id, name, slug)
+    const id = Number(insert.lastInsertRowid)
+    logAuditEvent({
+      action: 'project_create', actor: user.username, actor_id: user.id,
+      target_type: 'project', target_id: id,
+      detail: { client_id, name, slug }, ip_address: request.headers.get('x-real-ip') || 'unknown',
     })
-    const body = await request.json()
-
-    const name = String(body?.name || '').trim()
-    const description = typeof body?.description === 'string' ? body.description.trim() : ''
-    const prefixInput = String(body?.ticket_prefix || body?.ticketPrefix || '').trim()
-    const slugInput = String(body?.slug || '').trim()
-    const githubRepo = typeof body?.github_repo === 'string' ? body.github_repo.trim() || null : null
-    const deadline = typeof body?.deadline === 'number' ? body.deadline : null
-    const color = typeof body?.color === 'string' ? body.color.trim() || null : null
-
-    if (!name) return NextResponse.json({ error: 'Project name is required' }, { status: 400 })
-
-    const slug = slugInput ? slugify(slugInput) : slugify(name)
-    const ticketPrefix = normalizePrefix(prefixInput || name.slice(0, 5))
-    if (!slug) return NextResponse.json({ error: 'Invalid project slug' }, { status: 400 })
-    if (!ticketPrefix) return NextResponse.json({ error: 'Invalid ticket prefix' }, { status: 400 })
-
-    const exists = db.prepare(`
-      SELECT id FROM projects
-      WHERE workspace_id = ? AND (slug = ? OR ticket_prefix = ?)
-      LIMIT 1
-    `).get(workspaceId, slug, ticketPrefix) as { id: number } | undefined
-    if (exists) {
-      return NextResponse.json({ error: 'Project slug or ticket prefix already exists' }, { status: 409 })
+    return NextResponse.json({ project: { id, client_id, name, slug } }, { status: 201 })
+  } catch (err: unknown) {
+    if ((err as { message?: string }).message?.includes('UNIQUE')) {
+      return NextResponse.json({ error: 'Project slug already exists for this client' }, { status: 409 })
     }
-
-    const result = db.prepare(`
-      INSERT INTO projects (workspace_id, name, slug, description, ticket_prefix, github_repo, deadline, color, status, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', unixepoch(), unixepoch())
-    `).run(workspaceId, name, slug, description || null, ticketPrefix, githubRepo, deadline, color)
-
-    const project = db.prepare(`
-      SELECT id, workspace_id, name, slug, description, ticket_prefix, ticket_counter, status,
-             github_repo, deadline, color, github_sync_enabled, github_labels_initialized, github_default_branch, created_at, updated_at
-      FROM projects
-      WHERE id = ?
-    `).get(Number(result.lastInsertRowid))
-
-    return NextResponse.json({ project }, { status: 201 })
-  } catch (error) {
-    if (error instanceof ForbiddenError) {
-      return NextResponse.json({ error: error.message }, { status: error.status })
-    }
-    logger.error({ err: error }, 'POST /api/projects error')
+    logger.error({ err }, 'POST /api/projects failed')
     return NextResponse.json({ error: 'Failed to create project' }, { status: 500 })
+  }
+}
+
+export async function PUT(request: NextRequest) {
+  const user = getUserFromRequest(request)
+  if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+  const rateCheck = mutationLimiter(request)
+  if (rateCheck) return rateCheck
+
+  const result = await validateBody(request, updateProjectSchema)
+  if ('error' in result) return result.error
+
+  const { id, name, slug } = result.data
+  if (!name && !slug) {
+    return NextResponse.json({ error: 'No fields to update' }, { status: 400 })
+  }
+
+  const db = getDatabase()
+  const existing = db.prepare(`
+    SELECT p.id, p.client_id, p.name, c.region_id
+    FROM escp_projects p
+    JOIN escp_clients c ON c.id = p.client_id
+    WHERE p.id = ?
+  `).get(id) as {
+    id: number
+    client_id: number
+    name: string
+    region_id: number
+  } | undefined
+
+  if (!existing) return NextResponse.json({ error: 'Project not found' }, { status: 404 })
+  if (!canManageRegion(user, existing.region_id)) {
+    return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+  }
+
+  const nextName = name ?? existing.name
+  const nextSlug = slug || (name ? slugify(name) : undefined)
+
+  try {
+    db.prepare(`
+      UPDATE escp_projects
+      SET name = ?, slug = COALESCE(?, slug), updated_at = strftime('%s','now')
+      WHERE id = ?
+    `).run(nextName, nextSlug, id)
+
+    logAuditEvent({
+      action: 'project_update', actor: user.username, actor_id: user.id,
+      target_type: 'project', target_id: id,
+      detail: { name: nextName, slug: nextSlug }, ip_address: request.headers.get('x-real-ip') || 'unknown',
+    })
+
+    return NextResponse.json({ project: { id, client_id: existing.client_id, name: nextName, slug: nextSlug } })
+  } catch (err: unknown) {
+    if ((err as { message?: string }).message?.includes('UNIQUE')) {
+      return NextResponse.json({ error: 'Project slug already exists for this client' }, { status: 409 })
+    }
+    logger.error({ err }, 'PUT /api/projects failed')
+    return NextResponse.json({ error: 'Failed to update project' }, { status: 500 })
+  }
+}
+
+export async function DELETE(request: NextRequest) {
+  const user = getUserFromRequest(request)
+  if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+  const rateCheck = mutationLimiter(request)
+  if (rateCheck) return rateCheck
+
+  const result = await validateBody(request, deleteProjectSchema)
+  if ('error' in result) return result.error
+
+  const { id } = result.data
+  const db = getDatabase()
+  const existing = db.prepare(`
+    SELECT p.id, c.region_id
+    FROM escp_projects p
+    JOIN escp_clients c ON c.id = p.client_id
+    WHERE p.id = ?
+  `).get(id) as {
+    id: number
+    region_id: number
+  } | undefined
+
+  if (!existing) return NextResponse.json({ error: 'Project not found' }, { status: 404 })
+  if (!canManageRegion(user, existing.region_id)) {
+    return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+  }
+
+  try {
+    const del = db.prepare(`DELETE FROM escp_projects WHERE id = ?`).run(id)
+    if (del.changes === 0) return NextResponse.json({ error: 'Project not found' }, { status: 404 })
+
+    logAuditEvent({
+      action: 'project_delete', actor: user.username, actor_id: user.id,
+      target_type: 'project', target_id: id,
+      detail: {}, ip_address: request.headers.get('x-real-ip') || 'unknown',
+    })
+
+    return NextResponse.json({ success: true })
+  } catch (err: unknown) {
+    logger.error({ err }, 'DELETE /api/projects failed')
+    return NextResponse.json({ error: 'Failed to delete project' }, { status: 500 })
   }
 }

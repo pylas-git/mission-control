@@ -4,6 +4,7 @@ import Image from 'next/image'
 import { useState, useEffect, useCallback } from 'react'
 import { useTranslations } from 'next-intl'
 import { Button } from '@/components/ui/button'
+import { formatEnumLabel } from '@/lib/format-enum-label'
 import { useMissionControl } from '@/store'
 
 interface UserRecord {
@@ -446,7 +447,7 @@ export function UserManagementPanel() {
                       <span className={`px-2 py-0.5 rounded-full ${u.provider === 'google' ? 'bg-blue-500/20 text-blue-300' : 'bg-gray-500/20 text-gray-300'}`}>{u.provider || 'local'}</span>
                     </td>
                     <td className="px-4 py-2.5">
-                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${roleColors[u.role] || ''}`}>{u.role}</span>
+                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${roleColors[u.role] || ''}`}>{formatEnumLabel(u.role)}</span>
                     </td>
                     <td className="px-4 py-2.5 text-xs text-muted-foreground hidden md:table-cell">{formatDate(u.last_login_at)}</td>
                     <td className="px-4 py-2.5 text-right space-x-2">

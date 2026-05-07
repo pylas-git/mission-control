@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, statSync, readdirSync } from 'node:fs'
+import { existsSync, statSync, readdirSync } from 'node:fs'
 import { execSync } from 'node:child_process'
 import path from 'node:path'
 import os from 'node:os'
@@ -58,8 +58,6 @@ export const FIX_SAFETY: Record<string, FixSafety> = {
   dm_isolation: 'requires-restart',
   fs_workspace_only: 'requires-restart',
   exec_restricted: 'requires-review',
-  gateway_auth: 'requires-review',
-  gateway_bind: 'requires-review',
   elevated_disabled: 'requires-review',
   control_ui_device_auth: 'requires-review',
   control_ui_insecure_auth: 'requires-review',
@@ -218,8 +216,8 @@ function scanNetwork(): Category {
     id: 'allowed_hosts',
     name: 'Host allowlist configured',
     status: allowAny === '1' || allowAny === 'true' ? 'fail' : allowedHosts ? 'pass' : 'warn',
-    detail: allowAny === '1' || allowAny === 'true' ? 'MC_ALLOW_ANY_HOST is enabled — any host can connect' : allowedHosts ? `MC_ALLOWED_HOSTS: ${allowedHosts}` : 'MC_ALLOWED_HOSTS is not set',
-    fix: allowAny ? 'Remove MC_ALLOW_ANY_HOST and set MC_ALLOWED_HOSTS instead' : !allowedHosts ? 'Set MC_ALLOWED_HOSTS=localhost,127.0.0.1 in .env' : '',
+    detail: allowAny === '1' || allowAny === 'true' ? 'Unrestricted host access is enabled — any host can connect' : allowedHosts ? `Allowed hosts: ${allowedHosts}` : 'No explicit host allowlist is configured',
+    fix: allowAny ? 'Disable unrestricted host access and configure an explicit host allowlist' : !allowedHosts ? 'Configure an explicit host allowlist, for example localhost,127.0.0.1' : '',
     severity: 'high',
   })
 
@@ -243,233 +241,87 @@ function scanNetwork(): Category {
     severity: 'medium',
   })
 
-  const gwHost = config.gatewayHost
-  checks.push({
-    id: 'gateway_local',
-    name: 'Gateway bound to localhost',
-    status: gwHost === '127.0.0.1' || gwHost === 'localhost' ? 'pass' : 'fail',
-    detail: `Gateway host is ${gwHost}`,
-    fix: gwHost !== '127.0.0.1' && gwHost !== 'localhost' ? 'Set OPENCLAW_GATEWAY_HOST=127.0.0.1 — never expose the gateway publicly' : '',
-    severity: 'critical',
-  })
-
   return scoreCategory(checks)
 }
 
 // ---------------------------------------------------------------------------
-// Category: OpenClaw
+// Category: Platform
 // ---------------------------------------------------------------------------
 
 function scanOpenClaw(): Category {
   const checks: Check[] = []
-  const configPath = config.openclawConfigPath
+  const normalizedDataDir = path.resolve(config.dataDir)
+  const normalizedDbPath = path.resolve(config.dbPath)
+  const normalizedTokensPath = path.resolve(config.tokensPath)
+  const dataDirExists = existsSync(config.dataDir)
 
-  if (!configPath || !existsSync(configPath)) {
-    const gatewayOptional = process.env.NEXT_PUBLIC_GATEWAY_OPTIONAL === 'true'
+  checks.push({
+    id: 'platform_data_dir',
+    name: 'Platform data directory ready',
+    status: dataDirExists ? 'pass' : 'warn',
+    detail: dataDirExists
+      ? `Data directory available at ${config.dataDir}`
+      : 'Configured data directory has not been created yet',
+    fix: dataDirExists ? '' : 'Create the data directory or start the app once so it can initialize runtime storage',
+    severity: 'low',
+  })
+
+  const dataPathsScoped =
+    normalizedDbPath.startsWith(normalizedDataDir) &&
+    normalizedTokensPath.startsWith(normalizedDataDir)
+
+  checks.push({
+    id: 'platform_data_scope',
+    name: 'Sensitive files scoped to platform storage',
+    status: dataPathsScoped ? 'pass' : 'warn',
+    detail: dataPathsScoped
+      ? 'Database and token files live inside the configured platform data directory'
+      : 'One or more sensitive files are stored outside the configured platform data directory',
+    fix: dataPathsScoped ? '' : 'Set MISSION_CONTROL_DB_PATH and MISSION_CONTROL_TOKENS_PATH under MISSION_CONTROL_DATA_DIR',
+    severity: 'medium',
+  })
+
+  if (!existsSync(config.tokensPath)) {
     checks.push({
-      id: 'config_found',
-      name: 'OpenClaw config found',
-      status: gatewayOptional ? 'pass' : 'warn',
-      detail: gatewayOptional
-        ? 'OpenClaw not configured (standalone mode — gateway optional)'
-        : 'openclaw.json not found — OpenClaw checks skipped',
-      fix: gatewayOptional ? '' : 'Set OPENCLAW_HOME or OPENCLAW_CONFIG_PATH in .env',
+      id: 'platform_token_store',
+      name: 'Integration token store initialized',
+      status: 'pass',
+      detail: 'No token store file has been created yet',
+      fix: '',
       severity: 'low',
     })
-    return scoreCategory(checks)
-  }
-
-  let ocConfig: any
-  try {
-    ocConfig = JSON.parse(readFileSync(configPath, 'utf-8'))
-  } catch (err) {
+  } else if (process.platform === 'win32') {
     checks.push({
-      id: 'config_valid',
-      name: 'OpenClaw config valid',
-      status: 'fail',
-      detail: 'openclaw.json could not be parsed',
-      fix: 'Check openclaw.json for syntax errors',
-      severity: 'high',
+      id: 'platform_token_store',
+      name: 'Integration token store access',
+      status: 'pass',
+      detail: 'Token store exists; detailed permission checks are skipped on Windows',
+      fix: '',
+      severity: 'low',
     })
-    return scoreCategory(checks)
-  }
-
-  try {
-    const stat = statSync(configPath)
-    const mode = (stat.mode & 0o777).toString(8)
-    checks.push({
-      id: 'config_permissions',
-      name: 'Config file permissions',
-      status: mode === '600' ? 'pass' : 'warn',
-      detail: `openclaw.json permissions are ${mode}`,
-      fix: mode !== '600' ? `Run: chmod 600 ${configPath}` : '',
-      severity: 'medium',
-      fixSafety: 'safe',
-    })
-  } catch { /* skip */ }
-
-  const gwAuth = ocConfig?.gateway?.auth
-  const tokenOk = gwAuth?.mode === 'token' && (gwAuth?.token ?? '').trim().length > 0
-  const passwordOk = gwAuth?.mode === 'password' && (gwAuth?.password ?? '').trim().length > 0
-  const authOk = tokenOk || passwordOk
-  checks.push({
-    id: 'gateway_auth',
-    name: 'Gateway authentication',
-    status: authOk ? 'pass' : 'fail',
-    detail: tokenOk ? 'Token auth enabled' : passwordOk ? 'Password auth enabled' : `Auth mode: ${gwAuth?.mode || 'none'} (credential required)`,
-    fix: !authOk ? 'Set gateway.auth.mode to "token" with gateway.auth.token, or "password" with gateway.auth.password' : '',
-    severity: 'critical',
-  })
-
-  const gwBind = ocConfig?.gateway?.bind
-  checks.push({
-    id: 'gateway_bind',
-    name: 'Gateway bind address',
-    status: gwBind === 'loopback' || gwBind === '127.0.0.1' ? 'pass' : 'fail',
-    detail: `Gateway bind: ${gwBind || 'not set'}`,
-    fix: gwBind !== 'loopback' ? 'Set gateway.bind to "loopback" to prevent external access' : '',
-    severity: 'critical',
-  })
-
-  const toolsProfile = ocConfig?.tools?.profile
-  checks.push({
-    id: 'tools_restricted',
-    name: 'Tool permissions restricted',
-    status: toolsProfile && toolsProfile !== 'all' ? 'pass' : 'warn',
-    detail: `Tools profile: ${toolsProfile || 'default'}`,
-    fix: toolsProfile === 'all' ? 'Use a restrictive tools profile like "messaging" or "coding"' : '',
-    severity: 'low',
-  })
-
-  const elevated = ocConfig?.elevated?.enabled
-  checks.push({
-    id: 'elevated_disabled',
-    name: 'Elevated mode disabled',
-    status: elevated !== true ? 'pass' : 'fail',
-    detail: elevated === true ? 'Elevated mode is enabled' : 'Elevated mode is disabled',
-    fix: elevated === true ? 'Set elevated.enabled to false unless explicitly needed' : '',
-    severity: 'high',
-  })
-
-  const dmScope = ocConfig?.session?.dmScope
-  checks.push({
-    id: 'dm_isolation',
-    name: 'DM session isolation',
-    status: dmScope === 'per-channel-peer' ? 'pass' : 'warn',
-    detail: `DM scope: ${dmScope || 'default'}`,
-    fix: dmScope !== 'per-channel-peer' ? 'Set session.dmScope to "per-channel-peer" to prevent context leakage' : '',
-    severity: 'medium',
-  })
-
-  const execSecurity = ocConfig?.tools?.exec?.security
-  checks.push({
-    id: 'exec_restricted',
-    name: 'Exec tool restricted',
-    status: execSecurity === 'deny' ? 'pass' : execSecurity === 'allowlist' ? 'pass' : 'warn',
-    detail: `Exec security: ${execSecurity || 'default'}`,
-    fix: execSecurity !== 'deny' && execSecurity !== 'allowlist' ? 'Set tools.exec.security to "deny" or "allowlist"' : '',
-    severity: 'high',
-  })
-
-  const controlUi = ocConfig?.gateway?.controlUi
-  if (controlUi) {
-    checks.push({
-      id: 'control_ui_device_auth',
-      name: 'Control UI device auth',
-      status: controlUi.dangerouslyDisableDeviceAuth === true ? 'fail' : 'pass',
-      detail: controlUi.dangerouslyDisableDeviceAuth === true
-        ? 'DANGEROUS: dangerouslyDisableDeviceAuth is enabled — device identity checks are bypassed'
-        : 'Control UI device auth is active',
-      fix: controlUi.dangerouslyDisableDeviceAuth === true
-        ? 'Set gateway.controlUi.dangerouslyDisableDeviceAuth to false unless in a break-glass scenario'
-        : '',
-      severity: 'critical',
-    })
-
-    checks.push({
-      id: 'control_ui_insecure_auth',
-      name: 'Control UI secure auth',
-      status: controlUi.allowInsecureAuth === true ? 'warn' : 'pass',
-      detail: controlUi.allowInsecureAuth === true
-        ? 'allowInsecureAuth is enabled — consider HTTPS or localhost-only access'
-        : 'Insecure auth toggle is disabled',
-      fix: controlUi.allowInsecureAuth === true
-        ? 'Set gateway.controlUi.allowInsecureAuth to false, use HTTPS (Tailscale Serve) or localhost'
-        : '',
-      severity: 'high',
-    })
-  }
-
-  const fsWorkspaceOnly = ocConfig?.tools?.fs?.workspaceOnly
-  checks.push({
-    id: 'fs_workspace_only',
-    name: 'Filesystem workspace isolation',
-    status: fsWorkspaceOnly === true ? 'pass' : 'warn',
-    detail: fsWorkspaceOnly === true
-      ? 'File operations restricted to workspace directory'
-      : 'Agents can access files outside the workspace',
-    fix: fsWorkspaceOnly !== true ? 'Set tools.fs.workspaceOnly to true to restrict file access to the workspace' : '',
-    severity: 'medium',
-  })
-
-  const toolsDeny = ocConfig?.tools?.deny
-  const dangerousGroups = ['group:automation', 'group:runtime', 'group:fs']
-  const deniedGroups = Array.isArray(toolsDeny)
-    ? dangerousGroups.filter(g => toolsDeny.includes(g))
-    : []
-  checks.push({
-    id: 'tools_deny_list',
-    name: 'Dangerous tool groups denied',
-    status: deniedGroups.length >= 2 ? 'pass' : deniedGroups.length > 0 ? 'warn' : 'warn',
-    detail: Array.isArray(toolsDeny) && toolsDeny.length > 0
-      ? `Denied: ${toolsDeny.join(', ')}`
-      : 'No tool deny list configured',
-    fix: deniedGroups.length < 2
-      ? 'Add tools.deny: ["group:automation", "group:runtime", "group:fs"] for agents that don\'t need them'
-      : '',
-    severity: 'low',
-  })
-
-  const logRedact = ocConfig?.logging?.redactSensitive
-  checks.push({
-    id: 'log_redaction',
-    name: 'Log redaction enabled',
-    status: logRedact ? 'pass' : 'warn',
-    detail: logRedact ? `Log redaction: ${logRedact}` : 'Sensitive data redaction is not configured',
-    fix: !logRedact ? 'Set logging.redactSensitive to "tools" to prevent secrets leaking into logs' : '',
-    severity: 'low',
-  })
-
-  const sandboxMode = ocConfig?.agents?.defaults?.sandbox?.mode
-  checks.push({
-    id: 'sandbox_mode',
-    name: 'Agent sandbox mode',
-    status: sandboxMode === 'all' ? 'pass' : sandboxMode ? 'warn' : 'warn',
-    detail: sandboxMode ? `Sandbox mode: ${sandboxMode}` : 'No default sandbox mode configured',
-    fix: sandboxMode !== 'all'
-      ? 'Set agents.defaults.sandbox.mode to "all" for full isolation (recommended for untrusted inputs)'
-      : '',
-    severity: 'medium',
-  })
-
-  const safeBins = ocConfig?.tools?.exec?.safeBins
-  if (Array.isArray(safeBins) && safeBins.length > 0) {
-    const interpreters = ['python', 'python3', 'node', 'bun', 'deno', 'ruby', 'perl', 'bash', 'sh', 'zsh']
-    const unsafeInterpreters = safeBins.filter((b: string) => interpreters.includes(b))
-    const safeBinProfiles = ocConfig?.tools?.exec?.safeBinProfiles || {}
-    const unprofiledInterps = unsafeInterpreters.filter((b: string) => !safeBinProfiles[b])
-    checks.push({
-      id: 'safe_bins_interpreters',
-      name: 'Safe bins interpreter profiling',
-      status: unprofiledInterps.length === 0 ? 'pass' : 'warn',
-      detail: unprofiledInterps.length > 0
-        ? `Interpreter binaries without profiles: ${unprofiledInterps.join(', ')}`
-        : 'All interpreter binaries in safeBins have hardened profiles',
-      fix: unprofiledInterps.length > 0
-        ? `Define tools.exec.safeBinProfiles for: ${unprofiledInterps.join(', ')} — or remove them from safeBins`
-        : '',
-      severity: 'medium',
-    })
+  } else {
+    try {
+      const stat = statSync(config.tokensPath)
+      const mode = (stat.mode & 0o777).toString(8)
+      checks.push({
+        id: 'platform_token_store',
+        name: 'Integration token store permissions',
+        status: mode === '600' ? 'pass' : 'warn',
+        detail: `Token store permissions are ${mode}`,
+        fix: mode === '600' ? '' : `Run: chmod 600 ${config.tokensPath}`,
+        severity: 'medium',
+        fixSafety: 'safe',
+      })
+    } catch {
+      checks.push({
+        id: 'platform_token_store',
+        name: 'Integration token store permissions',
+        status: 'warn',
+        detail: 'Could not verify token store permissions',
+        fix: `Review access controls for ${config.tokensPath}`,
+        severity: 'medium',
+      })
+    }
   }
 
   return scoreCategory(checks)
@@ -571,42 +423,6 @@ function scanRuntime(): Category {
     checks.push({ id: 'db_integrity', name: 'Database integrity', status: 'warn', detail: 'Could not run integrity check', fix: '', severity: 'critical' })
   }
 
-  // Check if MCP audit receipts are being signed
-  try {
-    const db = getDatabase()
-    const recent = db.prepare(
-      "SELECT COUNT(*) as total, SUM(CASE WHEN signature IS NOT NULL THEN 1 ELSE 0 END) as signed FROM mcp_call_log WHERE created_at > unixepoch() - 86400"
-    ).get() as { total: number; signed: number } | undefined
-
-    const total = recent?.total ?? 0
-    const signed = recent?.signed ?? 0
-
-    if (total === 0) {
-      checks.push({
-        id: 'receipt_signing',
-        name: 'MCP audit receipt signing',
-        status: 'warn',
-        detail: 'No MCP calls logged in the last 24h',
-        fix: '',
-        severity: 'medium',
-      })
-    } else {
-      const allSigned = signed === total
-      checks.push({
-        id: 'receipt_signing',
-        name: 'MCP audit receipt signing',
-        status: allSigned ? 'pass' : 'warn',
-        detail: allSigned
-          ? `${signed}/${total} audit records have Ed25519 receipts`
-          : `${signed}/${total} records signed (${total - signed} unsigned)`,
-        fix: allSigned ? '' : 'Unsigned records may be from before receipt signing was enabled',
-        severity: 'medium',
-      })
-    }
-  } catch {
-    checks.push({ id: 'receipt_signing', name: 'MCP audit receipt signing', status: 'warn', detail: 'Could not check receipt status', fix: '', severity: 'medium' })
-  }
-
   return scoreCategory(checks)
 }
 
@@ -630,7 +446,7 @@ function scanOS(): Category {
       name: 'Not running as root',
       status: uid === 0 ? 'fail' : 'pass',
       detail: uid === 0 ? 'Process is running as root (UID 0)' : `Running as UID ${uid}`,
-      fix: uid === 0 ? 'Run Mission Control as a non-root user' : '',
+      fix: uid === 0 ? 'Run Endava Security Champion Program as a non-root user' : '',
       severity: 'critical',
       platform: 'all',
     })

@@ -4,8 +4,10 @@ import { requireRole } from '@/lib/auth'
 import { readLimiter } from '@/lib/rate-limit'
 import { logger } from '@/lib/logger'
 import { getSecurityPosture } from '@/lib/security-events'
-import { getMcpCallStats, verifyMcpCallReceipts } from '@/lib/mcp-audit'
 import { runSecurityScan } from '@/lib/security-scan'
+
+// mcp-audit lib removed during agent-orchestration strip-down
+function verifyMcpCallReceipts(_hours: number, _workspaceId: number) { return null }
 
 type Timeframe = 'hour' | 'day' | 'week' | 'month'
 

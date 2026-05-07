@@ -42,8 +42,7 @@ const FIX_SAFETY: Record<string, FixSafety> = {
   allowed_hosts: 'requires-restart', rate_limiting: 'requires-restart', api_key_set: 'requires-restart',
   log_redaction: 'requires-restart', dm_isolation: 'requires-restart',
   fs_workspace_only: 'requires-restart',
-  exec_restricted: 'requires-review', gateway_auth: 'requires-review',
-  gateway_bind: 'requires-review', elevated_disabled: 'requires-review',
+  exec_restricted: 'requires-review', elevated_disabled: 'requires-review',
   control_ui_device_auth: 'requires-review', control_ui_insecure_auth: 'requires-review',
 }
 
@@ -78,7 +77,7 @@ const OVERALL_COLOR: Record<string, string> = {
 const CATEGORY_LABELS: Record<string, { label: string; icon: string }> = {
   credentials: { label: 'Credentials', icon: 'K' },
   network: { label: 'Network', icon: 'N' },
-  openclaw: { label: 'OpenClaw', icon: 'O' },
+  openclaw: { label: 'Platform', icon: 'P' },
   runtime: { label: 'Runtime', icon: 'R' },
   os: { label: 'OS Security', icon: 'S' },
 }
@@ -180,7 +179,7 @@ export function SecurityScanCard({ compact = false, autoScan = false }: { compac
       <div className="flex flex-col items-center gap-4 py-6">
         <div className="text-center">
           <p className="text-sm text-muted-foreground mb-1">Run a comprehensive security scan of your installation</p>
-          <p className="text-xs text-muted-foreground/60">Checks credentials, network config, OpenClaw hardening, and runtime security</p>
+          <p className="text-xs text-muted-foreground/60">Checks credentials, network configuration, platform hardening, and runtime security</p>
         </div>
         <Button onClick={runScan} variant="outline" size="sm" className="border-void-cyan/30 text-void-cyan hover:bg-void-cyan/10">
           Run Security Scan

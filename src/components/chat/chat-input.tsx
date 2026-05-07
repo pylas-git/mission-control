@@ -4,6 +4,7 @@ import Image from 'next/image'
 import { useRef, useEffect, useState, useCallback } from 'react'
 import { useMissionControl, type ChatAttachment } from '@/store'
 import { Button } from '@/components/ui/button'
+import { formatEnumLabel } from '@/lib/format-enum-label'
 
 interface ChatInputProps {
   onSend: (content: string, attachments?: ChatAttachment[]) => void
@@ -216,7 +217,7 @@ export function ChatInput({ onSend, onAbort, disabled, agents = [], isGenerating
                 {agent.name.charAt(0).toUpperCase()}
               </div>
               <span className="font-medium text-foreground">@{agent.name}</span>
-              <span className="text-muted-foreground text-xs ml-auto">{agent.role}</span>
+              <span className="text-muted-foreground text-xs ml-auto">{formatEnumLabel(agent.role)}</span>
             </Button>
           ))}
         </div>

@@ -3,15 +3,18 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useTranslations } from 'next-intl'
 import { Button } from '@/components/ui/button'
-import { LanguageSwitcherSelect } from '@/components/ui/language-switcher'
 import { useMissionControl } from '@/store'
 import { useNavigateToPanel } from '@/lib/navigation'
 import { SecurityScanCard } from '@/components/onboarding/security-scan-card'
-import { AgentRuntimesSection } from '@/components/settings/agent-runtimes-section'
 import { Loader } from '@/components/ui/loader'
 import { clearOnboardingDismissedThisSession, clearOnboardingReplayFromStart } from '@/lib/onboarding-session'
-import { resolveCoordinatorDeliveryTarget, type CoordinatorAgentRecord } from '@/lib/coordinator-routing'
-import type { GatewaySession } from '@/lib/sessions'
+
+// Local stubs (coordinator-routing & sessions libs removed during agent-orchestration strip-down)
+type CoordinatorAgentRecord = { name: string; session_key: string | null; config: string }
+type GatewaySession = { id?: string; key?: string; agent?: string }
+function resolveCoordinatorDeliveryTarget(args: { to: string; coordinatorAgent: string; directAgent: CoordinatorAgentRecord | null; allAgents: CoordinatorAgentRecord[]; sessions: GatewaySession[]; configuredCoordinatorTarget: string | null }) {
+  return { deliveryName: args.to, openclawAgentId: '', resolvedBy: 'fallback' as const }
+}
 
 interface Setting {
   key: string
@@ -74,7 +77,7 @@ function parseCoordinatorTargetAgents(rawAgents: any[]): CoordinatorTargetAgent[
 }
 
 const categoryLabels: Record<string, { label: string; icon: string; description: string }> = {
-  general: { label: 'General', icon: '⚙', description: 'Core Mission Control settings' },
+  general: { label: 'General', icon: '⚙', description: 'Core Endava Security Champion Program settings' },
   security: { label: 'Security', icon: '🔑', description: 'API key management and security settings' },
   retention: { label: 'Data Retention', icon: '🗄', description: 'How long data is kept before cleanup' },
   chat: { label: 'Chat', icon: '💬', description: 'Coordinator routing and chat behavior settings' },
@@ -431,23 +434,6 @@ export function SettingsPanel() {
         </div>
       </div>
 
-      {/* Workspace Info */}
-      {currentUser?.role === 'admin' && (
-        <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg p-3 text-xs text-blue-300">
-          <strong className="text-blue-200">{t('workspaceManagementLabel')}</strong>{' '}
-          {t('workspaceManagementDesc1')}{' '}
-          <Button
-            onClick={() => navigateToPanel('super-admin')}
-            variant="link"
-            size="xs"
-            className="text-blue-400 hover:text-blue-300 p-0 h-auto"
-          >
-            {t('superAdmin')}
-          </Button>{' '}
-          {t('workspaceManagementDesc2')}
-        </div>
-      )}
-
       {/* Station Setup */}
       {currentUser?.role === 'admin' && (
         <div className="space-y-3">
@@ -489,9 +475,9 @@ export function SettingsPanel() {
                   const res = await fetch('/api/backup', { method: 'POST' })
                   const data = await res.json()
                   if (res.ok) {
-                    showFeedback(true, `MC backup created (${(data.backup?.size / 1024).toFixed(0)} KB)`)
+                    showFeedback(true, `ESCP backup created (${(data.backup?.size / 1024).toFixed(0)} KB)`)
                   } else {
-                    showFeedback(false, data.error || 'MC backup failed')
+                    showFeedback(false, data.error || 'ESCP backup failed')
                   }
                 } catch {
                   showFeedback(false, 'Network error')
@@ -562,8 +548,7 @@ export function SettingsPanel() {
             </Button>
           </div>
 
-          {/* Agent Runtimes */}
-          <AgentRuntimesSection showFeedback={showFeedback} />
+          {/* Agent Runtimes section removed during agent-orchestration strip-down */}
 
           {/* Hermes Agent Integration */}
           {hermesStatus?.installed && (
@@ -597,8 +582,8 @@ export function SettingsPanel() {
                   </div>
                   <p className="text-2xs text-muted-foreground mt-0.5">
                     {hermesStatus.hookInstalled
-                      ? 'MC hook installed — receiving telemetry from hermes-agent'
-                      : 'Install the MC hook for richer telemetry (agent status, session events)'}
+                      ? 'ESCP hook installed — receiving telemetry from hermes-agent'
+                      : 'Install the ESCP hook for richer telemetry (agent status, session events)'}
                   </p>
                 </div>
                 <Button
@@ -633,7 +618,7 @@ export function SettingsPanel() {
                     ? 'Working...'
                     : hermesStatus.hookInstalled
                       ? 'Uninstall Hook'
-                      : 'Install MC Hook'}
+                      : 'Install ESCP Hook'}
                 </Button>
               </div>
             </div>
@@ -649,9 +634,6 @@ export function SettingsPanel() {
           {feedback.text}
         </div>
       )}
-
-      {/* Language */}
-      <LanguageSection />
 
       {/* Category tabs */}
       <div className="flex gap-1 border-b border-border pb-px">
@@ -1071,20 +1053,6 @@ function InterfaceModeSelector() {
   )
 }
 
-function LanguageSection() {
-  const ts = useTranslations('settings')
-  return (
-    <div className="bg-card border border-border rounded-lg p-4">
-      <div className="flex items-center justify-between gap-4">
-        <div>
-          <p className="text-sm font-medium text-foreground">{ts('language')}</p>
-          <p className="text-2xs text-muted-foreground mt-0.5">{ts('languageDescription')}</p>
-        </div>
-        <LanguageSwitcherSelect />
-      </div>
-    </div>
-  )
-}
 
 /** Convert snake_case key to Title Case label */
 function formatLabel(key: string): string {

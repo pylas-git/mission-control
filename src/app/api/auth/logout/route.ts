@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 import { destroySession, getUserFromRequest } from '@/lib/auth'
 import { logAuditEvent } from '@/lib/db'
 import { getMcSessionCookieName, getMcSessionCookieOptions, isRequestSecure, parseMcSessionCookieHeader } from '@/lib/session-cookie'
+import { isAuthV2Enabled } from '@/lib/feature-flags'
 
 export async function POST(request: Request) {
   const user = getUserFromRequest(request)
@@ -23,6 +24,23 @@ export async function POST(request: Request) {
   response.cookies.set(cookieName, '', {
     ...getMcSessionCookieOptions({ maxAgeSeconds: 0, isSecureRequest }),
   })
+
+  // Also clear AUTH_V2 (Better Auth) session when enabled.
+  if (isAuthV2Enabled()) {
+    try {
+      const url = new URL(request.url)
+      await fetch(`${url.origin}/api/auth/v2/sign-out`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          cookie: request.headers.get('cookie') || '',
+        },
+        body: '{}',
+      })
+    } catch {
+      // Best effort: local logout is already applied above.
+    }
+  }
 
   return response
 }
