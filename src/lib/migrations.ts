@@ -1595,6 +1595,249 @@ const migrations: Migration[] = [
         CREATE INDEX IF NOT EXISTS idx_verification_identifier ON "verification"(identifier);
       `)
     }
+  },
+  {
+    id: '053_escp_belts',
+    up(db: Database.Database) {
+      // ── escp_projects: belt columns ──────────────────────────────────────
+      const projectCols = db.prepare(`PRAGMA table_info(escp_projects)`).all() as Array<{ name: string }>
+      const hasProjectCol = (n: string) => projectCols.some((c) => c.name === n)
+      if (!hasProjectCol('target_belt')) db.exec(`ALTER TABLE escp_projects ADD COLUMN target_belt INTEGER DEFAULT 0`)
+      if (!hasProjectCol('current_belt')) db.exec(`ALTER TABLE escp_projects ADD COLUMN current_belt INTEGER DEFAULT 0`)
+      if (!hasProjectCol('belt_achieved_at')) db.exec(`ALTER TABLE escp_projects ADD COLUMN belt_achieved_at INTEGER`)
+      if (!hasProjectCol('belt_expires_at')) db.exec(`ALTER TABLE escp_projects ADD COLUMN belt_expires_at INTEGER`)
+      if (!hasProjectCol('belt_grace_expires_at')) db.exec(`ALTER TABLE escp_projects ADD COLUMN belt_grace_expires_at INTEGER`)
+
+      // ── escp_project_champions: primary owner + target date ───────────────
+      const pcCols = db.prepare(`PRAGMA table_info(escp_project_champions)`).all() as Array<{ name: string }>
+      const hasPcCol = (n: string) => pcCols.some((c) => c.name === n)
+      if (!hasPcCol('is_primary')) db.exec(`ALTER TABLE escp_project_champions ADD COLUMN is_primary INTEGER NOT NULL DEFAULT 0`)
+      if (!hasPcCol('belt_target_date')) db.exec(`ALTER TABLE escp_project_champions ADD COLUMN belt_target_date INTEGER`)
+
+      db.exec(`
+        -- Belt requirement catalog (authored by global champion / admin, static snapshot)
+        CREATE TABLE IF NOT EXISTS escp_belt_requirements (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          belt_level INTEGER NOT NULL CHECK (belt_level BETWEEN 0 AND 8),
+          title TEXT NOT NULL,
+          description TEXT,
+          upstream_ref TEXT,
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+          created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+        );
+        CREATE INDEX IF NOT EXISTS idx_escp_belt_req_level ON escp_belt_requirements(belt_level, sort_order);
+
+        -- Belt course/lab catalog (links to SecureFlag; admin-managed, starts empty)
+        CREATE TABLE IF NOT EXISTS escp_belt_courses (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          belt_level INTEGER NOT NULL CHECK (belt_level BETWEEN 0 AND 8),
+          title TEXT NOT NULL,
+          url TEXT NOT NULL,
+          type TEXT NOT NULL DEFAULT 'course' CHECK (type IN ('course','lab')),
+          provider TEXT,
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+          created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+        );
+        CREATE INDEX IF NOT EXISTS idx_escp_belt_courses_level ON escp_belt_courses(belt_level, sort_order);
+
+        -- Champion belt state (one row per champion)
+        CREATE TABLE IF NOT EXISTS escp_champion_belts (
+          user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+          current_belt INTEGER NOT NULL DEFAULT 0,
+          achieved_at INTEGER,
+          expires_at INTEGER,
+          grace_expires_at INTEGER,
+          status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','grace','expired')),
+          verified_by INTEGER REFERENCES users(id) ON DELETE SET NULL
+        );
+
+        -- Champion course/lab completion (self-attest or future SecureFlag sync)
+        CREATE TABLE IF NOT EXISTS escp_champion_course_progress (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          course_id INTEGER NOT NULL REFERENCES escp_belt_courses(id) ON DELETE CASCADE,
+          status TEXT NOT NULL DEFAULT 'not_started' CHECK (status IN ('not_started','in_progress','completed')),
+          completed_at INTEGER,
+          completed_via TEXT NOT NULL DEFAULT 'manual' CHECK (completed_via IN ('manual','secureflag_sync')),
+          notes TEXT,
+          UNIQUE(user_id, course_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_escp_champion_course_user ON escp_champion_course_progress(user_id);
+
+        -- Belt skip requests (regional proposes, global approves)
+        CREATE TABLE IF NOT EXISTS escp_belt_skip_requests (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          from_belt INTEGER NOT NULL,
+          to_belt INTEGER NOT NULL,
+          requested_by INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+          requested_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          reason_text TEXT NOT NULL,
+          approved_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+          approved_at INTEGER,
+          status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','rejected'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_escp_belt_skip_user ON escp_belt_skip_requests(user_id, status);
+
+        -- Project assessment cycles (one active cycle per project per belt level)
+        CREATE TABLE IF NOT EXISTS escp_project_assessments (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          project_id INTEGER NOT NULL REFERENCES escp_projects(id) ON DELETE CASCADE,
+          belt_level INTEGER NOT NULL CHECK (belt_level BETWEEN 0 AND 8),
+          status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','renewal_open','expired','grace')),
+          primary_champion_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+          started_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          achieved_at INTEGER,
+          expires_at INTEGER,
+          grace_expires_at INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_escp_assessment_project ON escp_project_assessments(project_id, belt_level);
+
+        -- Assessment items: snapshot of requirements at cycle creation
+        CREATE TABLE IF NOT EXISTS escp_project_assessment_items (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          assessment_id INTEGER NOT NULL REFERENCES escp_project_assessments(id) ON DELETE CASCADE,
+          requirement_id INTEGER REFERENCES escp_belt_requirements(id) ON DELETE SET NULL,
+          belt_level INTEGER NOT NULL,
+          title TEXT NOT NULL,
+          description TEXT,
+          is_in_scope INTEGER NOT NULL DEFAULT 1,
+          status TEXT NOT NULL DEFAULT 'not_started' CHECK (status IN ('not_started','in_progress','submitted','approved','rejected','out_of_scope')),
+          submitted_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+          submitted_at INTEGER,
+          evidence_url TEXT,
+          evidence_note TEXT,
+          reviewed_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+          reviewed_at INTEGER,
+          rejection_reason TEXT,
+          sort_order INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_escp_assessment_items_cycle ON escp_project_assessment_items(assessment_id, belt_level);
+        CREATE INDEX IF NOT EXISTS idx_escp_assessment_items_status ON escp_project_assessment_items(assessment_id, status);
+
+        -- Qualification waivers: regional proposes, global approves for unqualified primary owners
+        CREATE TABLE IF NOT EXISTS escp_qualification_waivers (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          project_id INTEGER NOT NULL REFERENCES escp_projects(id) ON DELETE CASCADE,
+          champion_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          requested_by INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+          requested_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          approved_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+          approved_at INTEGER,
+          expires_at INTEGER,
+          remediation_target_belt INTEGER,
+          remediation_due_date INTEGER,
+          remediation_notes TEXT,
+          status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','rejected','expired'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_escp_waivers_project ON escp_qualification_waivers(project_id, status);
+        CREATE INDEX IF NOT EXISTS idx_escp_waivers_champion ON escp_qualification_waivers(champion_user_id, status);
+      `)
+    }
+  },
+  {
+    id: '054_escp_archive_lifecycle',
+    up(db: Database.Database) {
+      const regionCols = db.prepare(`PRAGMA table_info(escp_regions)`).all() as Array<{ name: string }>
+      const hasRegionCol = (n: string) => regionCols.some(c => c.name === n)
+      if (!hasRegionCol('archived_at')) db.exec(`ALTER TABLE escp_regions ADD COLUMN archived_at INTEGER`)
+      if (!hasRegionCol('archive_reason')) db.exec(`ALTER TABLE escp_regions ADD COLUMN archive_reason TEXT`)
+
+      const clientCols = db.prepare(`PRAGMA table_info(escp_clients)`).all() as Array<{ name: string }>
+      const hasClientCol = (n: string) => clientCols.some(c => c.name === n)
+      if (!hasClientCol('archived_at')) db.exec(`ALTER TABLE escp_clients ADD COLUMN archived_at INTEGER`)
+      if (!hasClientCol('archive_reason')) db.exec(`ALTER TABLE escp_clients ADD COLUMN archive_reason TEXT`)
+
+      const projectCols2 = db.prepare(`PRAGMA table_info(escp_projects)`).all() as Array<{ name: string }>
+      const hasProjectCol2 = (n: string) => projectCols2.some(c => c.name === n)
+      if (!hasProjectCol2('archive_reason')) db.exec(`ALTER TABLE escp_projects ADD COLUMN archive_reason TEXT`)
+
+      // Indexes for efficient archive-aware queries
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_escp_regions_archived ON escp_regions(archived_at) WHERE archived_at IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_escp_clients_archived ON escp_clients(archived_at) WHERE archived_at IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_escp_projects_archived ON escp_projects(archived_at) WHERE archived_at IS NOT NULL;
+      `)
+    }
+  },
+  {
+    id: '055_escp_hierarchy_fk_restrict',
+    up(db: Database.Database) {
+      // Hardening: prevent destructive hierarchy cascades without rebuilding
+      // the full table graph in a transaction. These triggers enforce
+      // archive-first behavior even if FK definitions still include CASCADE.
+      db.exec(`
+        CREATE TRIGGER IF NOT EXISTS trg_escp_regions_prevent_delete_with_accounts
+        BEFORE DELETE ON escp_regions
+        FOR EACH ROW
+        WHEN EXISTS (SELECT 1 FROM escp_clients WHERE region_id = OLD.id)
+        BEGIN
+          SELECT RAISE(ABORT, 'Cannot delete region with existing accounts');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_escp_clients_prevent_delete_with_projects
+        BEFORE DELETE ON escp_clients
+        FOR EACH ROW
+        WHEN EXISTS (SELECT 1 FROM escp_projects WHERE client_id = OLD.id)
+        BEGIN
+          SELECT RAISE(ABORT, 'Cannot delete account with existing projects');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_escp_projects_prevent_delete_with_history
+        BEFORE DELETE ON escp_projects
+        FOR EACH ROW
+        WHEN (
+          EXISTS (SELECT 1 FROM escp_project_assessments WHERE project_id = OLD.id)
+          OR EXISTS (SELECT 1 FROM escp_qualification_waivers WHERE project_id = OLD.id)
+        )
+        BEGIN
+          SELECT RAISE(ABORT, 'Cannot delete project with security history');
+        END;
+      `)
+    }
+  },
+  {
+    id: '056_escp_belt_definitions',
+    up(db: Database.Database) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS escp_belts (
+          level INTEGER PRIMARY KEY,
+          color TEXT NOT NULL,
+          name TEXT NOT NULL UNIQUE,
+          description TEXT,
+          created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+        );
+      `)
+
+      const existing = db.prepare('SELECT COUNT(*) as n FROM escp_belts').get() as { n: number }
+      if (existing.n === 0) {
+        const insert = db.prepare(`
+          INSERT INTO escp_belts (level, color, name, description)
+          VALUES (?, ?, ?, ?)
+        `)
+        const defaults: Array<[number, string, string]> = [
+          [0, '#e2e8f0', 'White'],
+          [1, '#fbbf24', 'Yellow'],
+          [2, '#f97316', 'Orange'],
+          [3, '#22c55e', 'Green'],
+          [4, '#3b82f6', 'Blue'],
+          [5, '#a855f7', 'Purple'],
+          [6, '#ef4444', 'Red'],
+          [7, '#92400e', 'Brown'],
+          [8, '#1f2937', 'Black'],
+        ]
+        db.transaction(() => {
+          for (const [level, color, name] of defaults) {
+            insert.run(level, color, name, `${name} belt`)
+          }
+        })()
+      }
+    }
   }
 ]
 

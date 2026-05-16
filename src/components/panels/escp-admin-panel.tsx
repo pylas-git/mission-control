@@ -4,6 +4,8 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { Button } from '@/components/ui/button'
 import { formatEnumLabel } from '@/lib/format-enum-label'
 import { useMissionControl } from '@/store'
+import { BeltCoursesPanel, BeltRequirementsPanel } from '@/components/panels/belt-catalog-panel'
+import { EscpStructureGraph } from '@/components/panels/escp-structure-graph'
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -25,6 +27,12 @@ interface Region {
   id: number
   name: string
   slug: string
+  regional_champion_id?: number | null
+  regional_champion_name?: string | null
+  archived_at?: number | null
+  archive_reason?: string | null
+  accounts_count?: number
+  projects_count?: number
 }
 
 interface Client {
@@ -32,6 +40,9 @@ interface Client {
   region_id: number
   name: string
   slug: string
+  archived_at?: number | null
+  archive_reason?: string | null
+  projects_count?: number
 }
 
 interface Project {
@@ -39,10 +50,17 @@ interface Project {
   client_id: number
   name: string
   slug: string
+  target_belt?: number | null
+  primary_champion_id?: number | null
+  primary_champion_name?: string | null
   client_name?: string
   region_id?: number
   region_name?: string
   archived_at: number | null
+  has_gap?: number
+  has_overdue_gap?: number
+  belt_gap?: number
+  primary_belt_target_date?: number | null
 }
 
 interface Champion {
@@ -69,6 +87,15 @@ interface SelectOption {
   label: string
 }
 
+interface BeltDefinition {
+  level: number
+  color: string
+  name: string
+  description?: string | null
+}
+
+const BELT_NAMES = ['White', 'Yellow', 'Orange', 'Green', 'Blue', 'Purple', 'Red', 'Brown', 'Black']
+
 // ─── Main Panel ─────────────────────────────────────────────────────────────
 
 const TABS = ['Invitations', 'Structure', 'Champions'] as const
@@ -77,9 +104,9 @@ type Tab = typeof TABS[number]
 type StructureMode = 'structure' | 'regions' | 'accounts' | 'projects'
 type CrudKind = 'region' | 'account' | 'project'
 
-function PanelShell({ title, description, children }: { title: string; description: string; children: React.ReactNode }) {
+function PanelShell({ title, description, children, wide = false }: { title: string; description: string; children: React.ReactNode; wide?: boolean }) {
   return (
-    <div className="p-6 w-full max-w-6xl mx-auto">
+    <div className={`w-full ${wide ? 'max-w-none px-6 pt-6 pb-0' : 'p-6 max-w-6xl mx-auto'}`}>
       <div className="mb-6">
         <h1 className="text-lg font-semibold text-foreground">{title}</h1>
         <p className="text-sm text-muted-foreground mt-1">{description}</p>
@@ -118,6 +145,248 @@ export function EscpAdminPanel() {
       {activeTab === 'Invitations' && <InvitationsTab />}
       {activeTab === 'Structure' && <StructureTab />}
       {activeTab === 'Champions' && <ChampionsTab />}
+    </PanelShell>
+  )
+}
+
+function RequirementsContent() {
+  const { currentUser } = useMissionControl()
+  const role = currentUser?.role
+  const canEdit = role === 'admin' || role === 'global_champion'
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-4">
+        <div>
+          <p className="text-sm text-muted-foreground">
+            Manage belt-level security requirements.
+            Editable by admin and global champion only.{' '}
+            <a href="/attribution" target="_blank" rel="noopener noreferrer" className="underline text-primary hover:opacity-80">
+              Attribution ↗
+            </a>
+          </p>
+        </div>
+      </div>
+      <BeltRequirementsPanel canEdit={canEdit} />
+    </div>
+  )
+}
+
+function BeltDefinitionsContent() {
+  const { currentUser } = useMissionControl()
+  const role = currentUser?.role
+  const canEdit = role === 'admin' || role === 'global_champion'
+  const [belts, setBelts] = useState<BeltDefinition[]>([])
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const [form, setForm] = useState({ level: '', color: '#3b82f6', name: '', description: '' })
+
+  const loadBelts = useCallback(async () => {
+    setLoading(true)
+    setError('')
+    try {
+      const res = await fetch('/api/belts', { cache: 'no-store' })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        setError(data.error || 'Failed to load belts')
+        setBelts([])
+        return
+      }
+      setBelts(Array.isArray(data.belts) ? data.belts : [])
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { loadBelts() }, [loadBelts])
+
+  const createBelt = async () => {
+    const levelNum = Number(form.level)
+    if (!Number.isInteger(levelNum) || levelNum < 0 || !form.name.trim()) return
+    setSaving(true)
+    setError('')
+    const res = await fetch('/api/belts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        level: levelNum,
+        color: form.color.trim(),
+        name: form.name.trim(),
+        description: form.description.trim() || undefined,
+      }),
+    })
+    const data = await res.json().catch(() => ({}))
+    setSaving(false)
+    if (!res.ok) {
+      setError(data.error || 'Failed to create belt')
+      return
+    }
+    setForm({ level: '', color: '#3b82f6', name: '', description: '' })
+    await loadBelts()
+  }
+
+  const deleteBelt = async (belt: BeltDefinition) => {
+    setSaving(true)
+    setError('')
+    const res = await fetch('/api/belts', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ level: belt.level }),
+    })
+    const data = await res.json().catch(() => ({}))
+    setSaving(false)
+    if (!res.ok) {
+      setError(data.error || 'Failed to delete belt')
+      return
+    }
+    await loadBelts()
+  }
+
+  return (
+    <div className="space-y-4">
+      <p className="text-sm text-muted-foreground">
+        Define belt metadata only. Use Training for champion learning materials and Requirements for project assessment criteria.
+      </p>
+
+      {canEdit && (
+        <div className="rounded-lg border border-border bg-card/40 p-4 space-y-3">
+          <div className="text-sm font-medium text-foreground">Add Belt</div>
+          <div className="grid grid-cols-1 md:grid-cols-[90px_120px_minmax(150px,1fr)_minmax(200px,1fr)_auto] gap-2">
+            <input
+              type="number"
+              min={0}
+              value={form.level}
+              onChange={e => setForm(prev => ({ ...prev, level: e.target.value }))}
+              placeholder="Level"
+              className="h-9 px-3 rounded-md bg-secondary border border-border text-sm text-foreground focus:outline-none"
+            />
+            <input
+              type="text"
+              value={form.color}
+              onChange={e => setForm(prev => ({ ...prev, color: e.target.value }))}
+              placeholder="#3b82f6"
+              className="h-9 px-3 rounded-md bg-secondary border border-border text-sm text-foreground focus:outline-none"
+            />
+            <input
+              type="text"
+              value={form.name}
+              onChange={e => setForm(prev => ({ ...prev, name: e.target.value }))}
+              placeholder="Belt name"
+              className="h-9 px-3 rounded-md bg-secondary border border-border text-sm text-foreground focus:outline-none"
+            />
+            <input
+              type="text"
+              value={form.description}
+              onChange={e => setForm(prev => ({ ...prev, description: e.target.value }))}
+              placeholder="Description"
+              className="h-9 px-3 rounded-md bg-secondary border border-border text-sm text-foreground focus:outline-none"
+            />
+            <Button size="sm" onClick={createBelt} disabled={saving || !form.name.trim() || form.level === ''}>Add</Button>
+          </div>
+        </div>
+      )}
+
+      {error && <div className="text-sm text-destructive">{error}</div>}
+
+      {loading ? (
+        <div className="text-sm text-muted-foreground">Loading belts…</div>
+      ) : belts.length === 0 ? (
+        <div className="text-sm text-muted-foreground">No belts defined yet.</div>
+      ) : (
+        <div className="rounded-lg border border-border overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-border text-xs text-muted-foreground">
+                <th className="text-left py-2.5 px-3">Level</th>
+                <th className="text-left py-2.5 px-3">Color</th>
+                <th className="text-left py-2.5 px-3">Name</th>
+                <th className="text-left py-2.5 px-3">Description</th>
+                <th className="text-right py-2.5 px-3">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {belts.map(belt => (
+                <tr key={belt.level} className="border-b border-border/50">
+                  <td className="py-2.5 px-3 text-foreground">{belt.level}</td>
+                  <td className="py-2.5 px-3">
+                    <span className="inline-flex items-center gap-2 text-xs text-muted-foreground">
+                      <span className="w-3 h-3 rounded-full border border-border" style={{ background: belt.color }} />
+                      {belt.color}
+                    </span>
+                  </td>
+                  <td className="py-2.5 px-3 text-foreground font-medium">{belt.name}</td>
+                  <td className="py-2.5 px-3 text-muted-foreground">{belt.description || '—'}</td>
+                  <td className="py-2.5 px-3 text-right">
+                    {canEdit && (
+                      <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive" disabled={saving} onClick={() => deleteBelt(belt)}>
+                        Delete
+                      </Button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
+}
+
+export function BeltDefinitionsAdminPanel() {
+  return (
+    <PanelShell
+      title="Belts"
+      description="Create and manage belt definitions."
+    >
+      <BeltDefinitionsContent />
+    </PanelShell>
+  )
+}
+
+export function BeltRequirementsAdminPanel() {
+  return (
+    <PanelShell
+      title="Requirements"
+      description="Configure project assessment requirements by belt."
+    >
+      <RequirementsContent />
+    </PanelShell>
+  )
+}
+
+export function BeltConfigAdminPanel() {
+  return <BeltRequirementsAdminPanel />
+}
+
+function CoursesContent() {
+  const { currentUser } = useMissionControl()
+  const role = currentUser?.role
+  const canEdit = role === 'admin' || role === 'global_champion'
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-4">
+        <div>
+          <p className="text-sm text-muted-foreground">
+            Manage SecureFlag course and lab mappings for each belt.
+            Editable by admin and global champion only.
+          </p>
+        </div>
+      </div>
+      <BeltCoursesPanel canEdit={canEdit} />
+    </div>
+  )
+}
+
+export function BeltCoursesAdminPanel() {
+  return (
+    <PanelShell
+      title="Training"
+      description="Configure belt training and lab catalog."
+    >
+      <CoursesContent />
     </PanelShell>
   )
 }
@@ -176,6 +445,7 @@ export function StructureAdminPanel() {
     <PanelShell
       title="Structure"
       description="Interactive graph view of region, account, and project hierarchy."
+      wide
     >
       <StructureTab mode="structure" />
     </PanelShell>
@@ -547,6 +817,7 @@ function StructureTab({ mode = 'structure' }: { mode?: StructureMode }) {
   const [regions, setRegions] = useState<Region[]>([])
   const [clients, setClients] = useState<Client[]>([])
   const [projects, setProjects] = useState<Project[]>([])
+  const [championUsers, setChampionUsers] = useState<User[]>([])
   const [loading, setLoading] = useState(true)
   const [expandedRegions, setExpandedRegions] = useState<Set<number>>(new Set())
   const [expandedClients, setExpandedClients] = useState<Set<number>>(new Set())
@@ -554,10 +825,16 @@ function StructureTab({ mode = 'structure' }: { mode?: StructureMode }) {
   const [addingClientFor, setAddingClientFor] = useState<number | null>(null)
   const [addingProjectFor, setAddingProjectFor] = useState<number | null>(null)
   const [newName, setNewName] = useState('')
+  const [newRegionChampionId, setNewRegionChampionId] = useState('')
+  const [newProjectTargetBelt, setNewProjectTargetBelt] = useState('0')
+  const [newProjectChampionId, setNewProjectChampionId] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [editTarget, setEditTarget] = useState<{ kind: CrudKind; id: number; name: string } | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<{ kind: CrudKind; id: number; name: string } | null>(null)
   const [editName, setEditName] = useState('')
+  const [editRegionChampionId, setEditRegionChampionId] = useState('')
+  const [editProjectTargetBelt, setEditProjectTargetBelt] = useState('0')
+  const [editProjectChampionId, setEditProjectChampionId] = useState('')
   const [actionError, setActionError] = useState('')
   const { currentUser } = useMissionControl()
   const canManageScoped = currentUser?.role === 'admin' || currentUser?.role === 'global_champion' || currentUser?.role === 'regional_champion'
@@ -578,14 +855,17 @@ function StructureTab({ mode = 'structure' }: { mode?: StructureMode }) {
   const load = useCallback(async () => {
     setLoading(true)
     try {
-      const [r, c, p] = await Promise.all([
+      const [r, c, p, u] = await Promise.all([
         fetch('/api/regions').then(res => res.ok ? res.json() : { regions: [] }),
         fetch('/api/clients').then(res => res.ok ? res.json() : { clients: [] }),
         fetch('/api/projects').then(res => res.ok ? res.json() : { projects: [] }),
+        fetch('/api/auth/users').then(res => res.ok ? res.json() : { users: [] }),
       ])
       setRegions(r.regions ?? [])
       setClients(c.clients ?? [])
       setProjects(p.projects ?? [])
+      const users = Array.isArray(u.users) ? (u.users as User[]) : []
+      setChampionUsers(users.filter(user => ['global_champion', 'regional_champion', 'security_champion'].includes(user.role)))
     } finally {
       setLoading(false)
     }
@@ -604,9 +884,16 @@ function StructureTab({ mode = 'structure' }: { mode?: StructureMode }) {
     await fetch('/api/regions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: newName.trim() }),
+      body: JSON.stringify({
+        name: newName.trim(),
+        regional_champion_id: newRegionChampionId ? Number(newRegionChampionId) : undefined,
+      }),
     })
-    setNewName(''); setAddingRegion(false); setSubmitting(false); load()
+    setNewName('')
+    setNewRegionChampionId('')
+    setAddingRegion(false)
+    setSubmitting(false)
+    load()
   }
 
   const addClient = async (regionId: number) => {
@@ -626,15 +913,32 @@ function StructureTab({ mode = 'structure' }: { mode?: StructureMode }) {
     await fetch('/api/projects', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: newName.trim(), client_id: clientId }),
+      body: JSON.stringify({
+        name: newName.trim(),
+        client_id: clientId,
+        target_belt: Number(newProjectTargetBelt || '0'),
+        primary_champion_id: newProjectChampionId ? Number(newProjectChampionId) : undefined,
+      }),
     })
-    setNewName(''); setAddingProjectFor(null); setSubmitting(false); load()
+    setNewName('')
+    setNewProjectTargetBelt('0')
+    setNewProjectChampionId('')
+    setAddingProjectFor(null)
+    setSubmitting(false)
+    load()
   }
 
-  const openEditModal = (kind: CrudKind, id: number, name: string) => {
+  const openEditModal = (kind: CrudKind, id: number, name: string, project?: Project, region?: Region) => {
     setActionError('')
     setEditTarget({ kind, id, name })
     setEditName(name)
+    if (kind === 'region') {
+      setEditRegionChampionId(region?.regional_champion_id ? String(region.regional_champion_id) : '')
+    }
+    if (kind === 'project') {
+      setEditProjectTargetBelt(String(project?.target_belt ?? 0))
+      setEditProjectChampionId(project?.primary_champion_id ? String(project.primary_champion_id) : '')
+    }
   }
 
   const openDeleteModal = (kind: CrudKind, id: number, name: string) => {
@@ -651,16 +955,39 @@ function StructureTab({ mode = 'structure' }: { mode?: StructureMode }) {
   const submitEdit = async () => {
     if (!editTarget) return
     const trimmed = editName.trim()
-    if (!trimmed || trimmed === editTarget.name) {
+    const currentProject = editTarget.kind === 'project'
+      ? projects.find(project => project.id === editTarget.id)
+      : null
+    const currentRegion = editTarget.kind === 'region'
+      ? regions.find(region => region.id === editTarget.id)
+      : null
+    const regionOnlyUnchanged = editTarget.kind === 'region' &&
+      trimmed === editTarget.name &&
+      String(currentRegion?.regional_champion_id ?? '') === editRegionChampionId
+    const projectOnlyUnchanged = editTarget.kind === 'project' &&
+      trimmed === editTarget.name &&
+      String(currentProject?.target_belt ?? 0) === editProjectTargetBelt &&
+      String(currentProject?.primary_champion_id ?? '') === editProjectChampionId
+
+    if (!trimmed || regionOnlyUnchanged || projectOnlyUnchanged || (trimmed === editTarget.name && editTarget.kind !== 'project' && editTarget.kind !== 'region')) {
       closeModals()
       return
+    }
+
+    const payload: Record<string, unknown> = { id: editTarget.id, name: trimmed }
+    if (editTarget.kind === 'region') {
+      payload.regional_champion_id = editRegionChampionId ? Number(editRegionChampionId) : null
+    }
+    if (editTarget.kind === 'project') {
+      payload.target_belt = Number(editProjectTargetBelt || '0')
+      payload.primary_champion_id = editProjectChampionId ? Number(editProjectChampionId) : null
     }
 
     setSubmitting(true)
     const res = await fetch(endpointByKind[editTarget.kind], {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: editTarget.id, name: trimmed }),
+      body: JSON.stringify(payload),
     })
     setSubmitting(false)
 
@@ -700,7 +1027,7 @@ function StructureTab({ mode = 'structure' }: { mode?: StructureMode }) {
       <InlineModal
         open={!!editTarget}
         title={editTarget ? `Edit ${labelByKind[editTarget.kind]}` : ''}
-        description={editTarget ? `Update the ${labelByKind[editTarget.kind].toLowerCase()} name.` : ''}
+        description={editTarget ? `Update the ${labelByKind[editTarget.kind].toLowerCase()} details.` : ''}
         onClose={closeModals}
         actions={(
           <>
@@ -721,6 +1048,51 @@ function StructureTab({ mode = 'structure' }: { mode?: StructureMode }) {
             onKeyDown={e => { if (e.key === 'Enter') submitEdit() }}
             className="w-full h-9 px-3 rounded-md bg-secondary border border-border text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
           />
+
+          {editTarget?.kind === 'project' && (
+            <>
+              <label className="block text-xs text-muted-foreground mt-2">Target belt</label>
+              <select
+                value={editProjectTargetBelt}
+                onChange={e => setEditProjectTargetBelt(e.target.value)}
+                className="w-full h-9 px-3 rounded-md bg-secondary border border-border text-sm text-foreground focus:outline-none"
+              >
+                {BELT_NAMES.map((belt, idx) => (
+                  <option key={belt} value={idx}>L{idx} {belt}</option>
+                ))}
+              </select>
+
+              <label className="block text-xs text-muted-foreground mt-2">Primary champion</label>
+              <select
+                value={editProjectChampionId}
+                onChange={e => setEditProjectChampionId(e.target.value)}
+                className="w-full h-9 px-3 rounded-md bg-secondary border border-border text-sm text-foreground focus:outline-none"
+              >
+                <option value="">Unassigned</option>
+                {championUsers.map(champion => (
+                  <option key={champion.id} value={champion.id}>{champion.display_name || champion.username}</option>
+                ))}
+              </select>
+            </>
+          )}
+
+          {editTarget?.kind === 'region' && (
+            <>
+              <label className="block text-xs text-muted-foreground mt-2">Regional champion</label>
+              <select
+                value={editRegionChampionId}
+                onChange={e => setEditRegionChampionId(e.target.value)}
+                className="w-full h-9 px-3 rounded-md bg-secondary border border-border text-sm text-foreground focus:outline-none"
+              >
+                <option value="">Unassigned</option>
+                {championUsers
+                  .filter(champion => champion.role === 'regional_champion' || champion.role === 'security_champion')
+                  .map(champion => (
+                    <option key={champion.id} value={champion.id}>{champion.display_name || champion.username}</option>
+                  ))}
+              </select>
+            </>
+          )}
           {actionError && <div className="text-xs text-destructive">{actionError}</div>}
         </div>
       </InlineModal>
@@ -745,6 +1117,10 @@ function StructureTab({ mode = 'structure' }: { mode?: StructureMode }) {
   )
 
   if (loading) return <div className="text-sm text-muted-foreground">Loading…</div>
+
+  if (mode === 'structure') {
+    return <EscpStructureGraph />
+  }
 
   if (mode === 'regions') {
     const totalAccounts = clients.length
@@ -791,7 +1167,7 @@ function StructureTab({ mode = 'structure' }: { mode?: StructureMode }) {
                       {canManageRegions && (
                         <div className="flex items-center gap-1">
                           <button
-                            onClick={() => openEditModal('region', region.id, region.name)}
+                            onClick={() => openEditModal('region', region.id, region.name, undefined, region)}
                             className="text-[10px] px-1.5 py-0.5 rounded border border-border text-muted-foreground hover:text-foreground hover:border-primary/40"
                             disabled={submitting}
                           >
@@ -807,6 +1183,17 @@ function StructureTab({ mode = 'structure' }: { mode?: StructureMode }) {
                         </div>
                       )}
                     </div>
+                  </div>
+
+                  <div className="mt-3 rounded-md border border-cyan-500/20 bg-cyan-500/5 px-2.5 py-2">
+                    <div className="text-[10px] uppercase tracking-wide text-cyan-300/75">Regional Champion</div>
+                    {region.regional_champion_name ? (
+                      <div className="text-xs text-cyan-200 font-medium truncate mt-0.5" title={region.regional_champion_name}>
+                        {region.regional_champion_name}
+                      </div>
+                    ) : (
+                      <div className="text-xs text-muted-foreground mt-0.5">Unassigned</div>
+                    )}
                   </div>
 
                   <div className="mt-4 grid grid-cols-2 gap-2">
@@ -828,17 +1215,37 @@ function StructureTab({ mode = 'structure' }: { mode?: StructureMode }) {
         {canManageRegions && (
           <div className="pt-1">
             {addingRegion ? (
-              <InlineAddForm
-                placeholder="Region name"
-                value={newName}
-                onChange={setNewName}
-                onSubmit={addRegion}
-                onCancel={() => { setAddingRegion(false); setNewName('') }}
-                submitting={submitting}
-              />
+              <div className="grid grid-cols-1 md:grid-cols-[minmax(160px,1fr)_220px_auto_auto] gap-2 my-1">
+                <input
+                  autoFocus
+                  type="text"
+                  value={newName}
+                  onChange={e => setNewName(e.target.value)}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') addRegion()
+                    if (e.key === 'Escape') { setAddingRegion(false); setNewName(''); setNewRegionChampionId('') }
+                  }}
+                  placeholder="Region name"
+                  className="h-8 px-3 rounded-md bg-secondary border border-border text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
+                />
+                <select
+                  value={newRegionChampionId}
+                  onChange={e => setNewRegionChampionId(e.target.value)}
+                  className="h-8 px-2 rounded-md bg-secondary border border-border text-xs text-foreground focus:outline-none"
+                >
+                  <option value="">Unassigned champion</option>
+                  {championUsers
+                    .filter(champion => champion.role === 'regional_champion' || champion.role === 'security_champion')
+                    .map(champion => (
+                      <option key={champion.id} value={champion.id}>{champion.display_name || champion.username}</option>
+                    ))}
+                </select>
+                <Button size="sm" onClick={addRegion} disabled={!newName.trim() || submitting}>Add</Button>
+                <Button size="sm" variant="ghost" onClick={() => { setAddingRegion(false); setNewName(''); setNewRegionChampionId('') }}>Cancel</Button>
+              </div>
             ) : (
               <button
-                onClick={() => setAddingRegion(true)}
+                onClick={() => { setAddingRegion(true); setNewRegionChampionId('') }}
                 className="text-sm text-primary hover:underline"
               >
                 + Add region
@@ -949,12 +1356,15 @@ function StructureTab({ mode = 'structure' }: { mode?: StructureMode }) {
                     <div key={project.id} className="flex items-center justify-between rounded border border-border/50 px-3 py-2">
                       <div className="flex items-center gap-2">
                         <span className="text-sm text-foreground">{project.name}</span>
+                        <span className="text-xs px-1.5 py-0.5 rounded bg-secondary text-muted-foreground">L{project.target_belt ?? 0} {BELT_NAMES[project.target_belt ?? 0]}</span>
+                        {project.primary_champion_name && <span className="text-xs px-1.5 py-0.5 rounded bg-cyan-500/10 text-cyan-300">{project.primary_champion_name}</span>}
                         {project.archived_at && <span className="text-xs text-yellow-500">archived</span>}
+                        {project.has_overdue_gap ? <span className="text-xs px-1.5 py-0.5 rounded bg-red-500/15 text-red-300">overdue gap</span> : project.has_gap ? <span className="text-xs px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300">gap</span> : null}
                       </div>
                       {canManageScoped && (
                         <div className="flex items-center gap-2">
                           <button
-                            onClick={() => openEditModal('project', project.id, project.name)}
+                            onClick={() => openEditModal('project', project.id, project.name, project)}
                             className="text-xs px-1.5 py-0.5 rounded border border-border text-muted-foreground hover:text-foreground hover:border-primary/40"
                             disabled={submitting}
                           >
@@ -977,17 +1387,42 @@ function StructureTab({ mode = 'structure' }: { mode?: StructureMode }) {
 
                   {canManageScoped && (
                     addingProjectFor === client.id ? (
-                      <InlineAddForm
-                        placeholder="Project name"
-                        value={newName}
-                        onChange={setNewName}
-                        onSubmit={() => addProject(client.id)}
-                        onCancel={() => { setAddingProjectFor(null); setNewName('') }}
-                        submitting={submitting}
-                      />
+                      <div className="grid grid-cols-1 md:grid-cols-[minmax(140px,1fr)_140px_200px_auto_auto] gap-2 my-1">
+                        <input
+                          autoFocus
+                          type="text"
+                          value={newName}
+                          onChange={e => setNewName(e.target.value)}
+                          placeholder="Project name"
+                          className="h-8 px-3 rounded-md bg-secondary border border-border text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
+                        />
+                        <select
+                          value={newProjectTargetBelt}
+                          onChange={e => setNewProjectTargetBelt(e.target.value)}
+                          className="h-8 px-2 rounded-md bg-secondary border border-border text-xs text-foreground focus:outline-none"
+                        >
+                          {BELT_NAMES.map((belt, idx) => (
+                            <option key={belt} value={idx}>L{idx} {belt}</option>
+                          ))}
+                        </select>
+                        <select
+                          value={newProjectChampionId}
+                          onChange={e => setNewProjectChampionId(e.target.value)}
+                          className="h-8 px-2 rounded-md bg-secondary border border-border text-xs text-foreground focus:outline-none"
+                        >
+                          <option value="">Unassigned champion</option>
+                          {championUsers
+                            .filter(champion => champion.region_id == null || champion.region_id === client.region_id)
+                            .map(champion => (
+                              <option key={champion.id} value={champion.id}>{champion.display_name || champion.username}</option>
+                            ))}
+                        </select>
+                        <Button size="sm" onClick={() => addProject(client.id)} disabled={!newName.trim() || submitting}>Add</Button>
+                        <Button size="sm" variant="ghost" onClick={() => { setAddingProjectFor(null); setNewName(''); setNewProjectTargetBelt('0'); setNewProjectChampionId('') }}>Cancel</Button>
+                      </div>
                     ) : (
                       <button
-                        onClick={() => { setAddingProjectFor(client.id); setNewName('') }}
+                        onClick={() => { setAddingProjectFor(client.id); setNewName(''); setNewProjectTargetBelt('0'); setNewProjectChampionId('') }}
                         className="text-xs text-primary hover:underline"
                       >
                         + Add project
@@ -1093,6 +1528,7 @@ function StructureTab({ mode = 'structure' }: { mode?: StructureMode }) {
                               <span className="w-1.5 h-1.5 rounded-full bg-border inline-block" />
                               <span>{proj.name}</span>
                               {proj.archived_at && <span className="text-xs text-yellow-500">(archived)</span>}
+                              {proj.has_overdue_gap ? <span className="text-xs px-1.5 py-0.5 rounded bg-red-500/15 text-red-300">overdue gap</span> : proj.has_gap ? <span className="text-xs px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300">gap</span> : null}
                             </div>
                           ))}
                         </div>
@@ -1106,19 +1542,39 @@ function StructureTab({ mode = 'structure' }: { mode?: StructureMode }) {
         )
       })}
 
-      {canManage && (
+      {canManageRegions && (
         addingRegion ? (
-          <InlineAddForm
-            placeholder="Region name"
-            value={newName}
-            onChange={setNewName}
-            onSubmit={addRegion}
-            onCancel={() => { setAddingRegion(false); setNewName('') }}
-            submitting={submitting}
-          />
+          <div className="grid grid-cols-1 md:grid-cols-[minmax(160px,1fr)_220px_auto_auto] gap-2 my-1">
+            <input
+              autoFocus
+              type="text"
+              value={newName}
+              onChange={e => setNewName(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter') addRegion()
+                if (e.key === 'Escape') { setAddingRegion(false); setNewName(''); setNewRegionChampionId('') }
+              }}
+              placeholder="Region name"
+              className="h-8 px-3 rounded-md bg-secondary border border-border text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
+            />
+            <select
+              value={newRegionChampionId}
+              onChange={e => setNewRegionChampionId(e.target.value)}
+              className="h-8 px-2 rounded-md bg-secondary border border-border text-xs text-foreground focus:outline-none"
+            >
+              <option value="">Unassigned champion</option>
+              {championUsers
+                .filter(champion => champion.role === 'regional_champion' || champion.role === 'security_champion')
+                .map(champion => (
+                  <option key={champion.id} value={champion.id}>{champion.display_name || champion.username}</option>
+                ))}
+            </select>
+            <Button size="sm" onClick={addRegion} disabled={!newName.trim() || submitting}>Add</Button>
+            <Button size="sm" variant="ghost" onClick={() => { setAddingRegion(false); setNewName(''); setNewRegionChampionId('') }}>Cancel</Button>
+          </div>
         ) : (
           <button
-            onClick={() => setAddingRegion(true)}
+            onClick={() => { setAddingRegion(true); setNewRegionChampionId('') }}
             className="mt-2 text-sm text-primary hover:underline"
           >
             + Add region
@@ -1129,6 +1585,9 @@ function StructureTab({ mode = 'structure' }: { mode?: StructureMode }) {
     {crudModals}
     </>
   )
+
+  // mode === 'structure': React Flow interactive graph
+  return <EscpStructureGraph />
 }
 
 // ─── Champions Tab ─────────────────────────────────────────────────────────────
@@ -1144,6 +1603,7 @@ function ChampionsTab() {
   const [editingUserId, setEditingUserId] = useState<number | null>(null)
   const [roleDraft, setRoleDraft] = useState('')
   const [regionDraft, setRegionDraft] = useState('')
+  const [displayNameDraft, setDisplayNameDraft] = useState('')
   const [saving, setSaving] = useState(false)
   const [pendingDelete, setPendingDelete] = useState<User | null>(null)
   const [feedback, setFeedback] = useState<string | null>(null)
@@ -1221,6 +1681,7 @@ function ChampionsTab() {
     setEditingUserId(u.id)
     setRoleDraft(u.role)
     setRegionDraft(u.region_id ? String(u.region_id) : '')
+    setDisplayNameDraft(u.display_name || '')
   }
 
   const saveRole = async (u: User) => {
@@ -1228,17 +1689,26 @@ function ChampionsTab() {
       setEditingUserId(null)
       return
     }
+    const nextDisplayName = displayNameDraft.trim()
+    const currentDisplayName = (u.display_name || '').trim()
     const nextRegionId = regionDraft ? Number(regionDraft) : null
     const currentRegionId = u.region_id ?? null
-    if (roleDraft === u.role && nextRegionId === currentRegionId) {
+    if (actorRole === 'admin' && !nextDisplayName) {
+      setFeedback('Display name cannot be empty')
+      return
+    }
+    const displayNameChanged = actorRole === 'admin' && nextDisplayName !== currentDisplayName
+    if (!displayNameChanged && roleDraft === u.role && nextRegionId === currentRegionId) {
       setEditingUserId(null)
       return
     }
     setSaving(true)
+    const payload: Record<string, unknown> = { id: u.id, role: roleDraft, region_id: nextRegionId }
+    if (actorRole === 'admin') payload.display_name = nextDisplayName
     const res = await fetch('/api/auth/users', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: u.id, role: roleDraft, region_id: nextRegionId }),
+      body: JSON.stringify(payload),
     })
     const data = await res.json().catch(() => ({}))
     setSaving(false)
@@ -1368,8 +1838,22 @@ function ChampionsTab() {
                 return (
                   <tr key={u.id} className="border-b border-border/50 hover:bg-secondary/20">
                     <td className="py-2.5 px-3">
-                      <div className="font-medium text-foreground">{u.display_name || u.username}</div>
-                      <div className="text-xs text-muted-foreground">@{u.username}</div>
+                      {isEditing && actorRole === 'admin' ? (
+                        <div className="space-y-1">
+                          <input
+                            value={displayNameDraft}
+                            onChange={e => setDisplayNameDraft(e.target.value)}
+                            className="h-8 px-2 rounded-md bg-secondary border border-border text-sm text-foreground w-full focus:outline-none"
+                            placeholder="Display name"
+                          />
+                          <div className="text-xs text-muted-foreground">@{u.username}</div>
+                        </div>
+                      ) : (
+                        <>
+                          <div className="font-medium text-foreground">{u.display_name || u.username}</div>
+                          <div className="text-xs text-muted-foreground">@{u.username}</div>
+                        </>
+                      )}
                     </td>
                     <td className="py-2.5 px-3 text-muted-foreground">{u.email || '—'}</td>
                     <td className="py-2.5 px-3">
@@ -1415,7 +1899,15 @@ function ChampionsTab() {
                       <div className="inline-flex items-center gap-2">
                         {isEditing ? (
                           <>
-                            <Button size="sm" onClick={() => saveRole(u)} disabled={saving || !canEditThisUser || isSelf || (roleDraft === u.role && (regionDraft ? Number(regionDraft) : null) === (u.region_id ?? null))}>
+                            <Button
+                              size="sm"
+                              onClick={() => saveRole(u)}
+                              disabled={saving || !canEditThisUser || isSelf || (
+                                roleDraft === u.role &&
+                                (regionDraft ? Number(regionDraft) : null) === (u.region_id ?? null) &&
+                                (actorRole !== 'admin' || displayNameDraft.trim() === (u.display_name || '').trim())
+                              )}
+                            >
                               Save
                             </Button>
                             <Button size="sm" variant="ghost" onClick={() => setEditingUserId(null)} disabled={saving}>Cancel</Button>

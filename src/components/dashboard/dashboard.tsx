@@ -21,6 +21,7 @@ export function Dashboard() {
     agents,
     tasks,
     setActiveConversation,
+    currentUser,
   } = useMissionControl()
 
   const navigateToPanel = useNavigateToPanel()
@@ -44,11 +45,13 @@ export function Dashboard() {
   const [claudeStats, setClaudeStats] = useState<ClaudeStats | null>(null)
   const [githubStats, setGithubStats] = useState<any>(null)
   const [hermesCronJobCount, setHermesCronJobCount] = useState(0)
+  const [beltReminders, setBeltReminders] = useState<any | null>(null)
   const [loading, setLoading] = useState({
     system: true,
     sessions: true,
     claude: true,
     github: true,
+    belts: true,
   })
 
   const loadDashboard = useCallback(async () => {
@@ -115,8 +118,23 @@ export function Dashboard() {
       setLoading(prev => ({ ...prev, claude: false, github: false }))
     }
 
+    if (currentUser?.id) {
+      requests.push(
+        fetch(`/api/champions/${currentUser.id}/belt`)
+          .then(async (res) => {
+            if (!res.ok) return
+            const data = await res.json()
+            setBeltReminders(data)
+          })
+          .catch(() => {})
+          .finally(() => setLoading(prev => ({ ...prev, belts: false })))
+      )
+    } else {
+      setLoading(prev => ({ ...prev, belts: false }))
+    }
+
     await Promise.allSettled(requests)
-  }, [isLocal, setSessions])
+  }, [currentUser?.id, isLocal, setSessions])
 
   useSmartPoll(loadDashboard, isLocal ? 15000 : 60000, { pauseWhenConnected: true })
 
@@ -125,6 +143,10 @@ export function Dashboard() {
   const isSessionsLoading = loading.sessions && sessions.length === 0
   const isClaudeLoading = isLocal && loading.claude && !claudeStats
   const isGithubLoading = isLocal && loading.github && !githubStats
+  const beltAssignments = Array.isArray(beltReminders?.assignments) ? beltReminders.assignments : []
+  const overdueAssignments = beltAssignments.filter((assignment: any) => assignment.gap_status === 'overdue')
+  const gapAssignments = beltAssignments.filter((assignment: any) => assignment.gap_status === 'gap')
+  const beltStatus = beltReminders?.belt?.status
 
   const memPct = systemStats?.memory?.total
     ? Math.round((systemStats.memory.used / systemStats.memory.total) * 100)
@@ -264,6 +286,34 @@ export function Dashboard() {
   return (
     <div className="p-5 space-y-4">
       <OnboardingChecklistWidget />
+      {!loading.belts && currentUser?.id && (beltStatus === 'grace' || beltStatus === 'expired' || overdueAssignments.length > 0 || gapAssignments.length > 0) && (
+        <div className="rounded-lg border border-border bg-card p-4 space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <div className="text-sm font-medium text-foreground">Belt Reminders</div>
+              <div className="text-xs text-muted-foreground">Training and qualification items that need attention.</div>
+            </div>
+            <Button size="sm" variant="ghost" onClick={() => navigateToPanel('learning')}>Open Learning</Button>
+          </div>
+          <div className="space-y-2 text-sm">
+            {(beltStatus === 'grace' || beltStatus === 'expired') && (
+              <div className={`rounded-md px-3 py-2 ${beltStatus === 'expired' ? 'bg-red-500/10 text-red-300' : 'bg-amber-500/10 text-amber-300'}`}>
+                Champion belt status is {beltStatus}. Renewal training should be completed before qualification lapses.
+              </div>
+            )}
+            {overdueAssignments.map((assignment: any) => (
+              <div key={`overdue-${assignment.project_id}`} className="rounded-md px-3 py-2 bg-red-500/10 text-red-300">
+                {assignment.project_name}: belt gap is overdue.
+              </div>
+            ))}
+            {gapAssignments.slice(0, 3).map((assignment: any) => (
+              <div key={`gap-${assignment.project_id}`} className="rounded-md px-3 py-2 bg-amber-500/10 text-amber-300">
+                {assignment.project_name}: target belt gap remains open.
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
       <EmptyStateLaunchpad
         agentCount={dbStats?.agents.total ?? agents.length}
         taskCount={dbStats?.tasks.total ?? tasks.length}

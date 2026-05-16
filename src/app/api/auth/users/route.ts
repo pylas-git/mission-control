@@ -154,6 +154,15 @@ export async function PUT(request: NextRequest) {
     const existingRole = normalizeRole(existing.role)
     const actorRegionId = actorRole === 'regional_champion' ? getUserRegionId(currentUser.id) : null
 
+    if (display_name !== undefined) {
+      if (actorRole !== 'admin') {
+        return NextResponse.json({ error: 'Only admins can change display names' }, { status: 403 })
+      }
+      if (typeof display_name !== 'string' || !display_name.trim()) {
+        return NextResponse.json({ error: 'Display name cannot be empty' }, { status: 400 })
+      }
+    }
+
     // Prevent changing your own role.
     if (userId === currentUser.id && role && role !== normalizeRole(currentUser.role)) {
       return NextResponse.json({ error: 'Cannot change your own role' }, { status: 400 })

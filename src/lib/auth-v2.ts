@@ -366,6 +366,12 @@ function buildAuth() {
               return true
             }
 
+            // Dev bypass: allow mock OIDC users to sign in without invitation
+            if (mockIssuer) {
+              logSafe('invite_gate_bypass_dev', { email, reason: 'mock_oidc_dev' })
+              return true
+            }
+
             if (!invite) {
               logSafe('invite_gate_reject', { email, reason: 'no_invitation' })
               return false
@@ -392,7 +398,7 @@ function buildAuth() {
             }
 
             const invite = findPendingInvitationByEmail(email)
-            if (!invite) return
+            if (!invite && !mockIssuer) return
 
             // Pull entra OID from the linked account row (added by genericOAuth).
             let entraObjectId: string | null = null
@@ -418,6 +424,21 @@ function buildAuth() {
               logSafe('invite_accepted', {
                 email,
                 invitationId: invite.id,
+                localUserId: userId,
+              })
+              return
+            }
+
+            // Dev mode: provision mock OIDC user as admin
+            if (mockIssuer && !invite) {
+              const userId = provisionBootstrapAdminFromMicrosoft({
+                email,
+                displayName: String((user as { name?: string }).name || email),
+                entraObjectId,
+                entraTenantId: tenantId,
+              })
+              logSafe('mock_oidc_admin_created', {
+                email,
                 localUserId: userId,
               })
               return

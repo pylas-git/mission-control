@@ -17,12 +17,19 @@ import { AlertRulesPanel } from '@/components/panels/alert-rules-panel'
 import { SecurityAuditPanel } from '@/components/panels/security-audit-panel'
 import { SystemMonitorPanel } from '@/components/panels/system-monitor-panel'
 import { ChatPagePanel } from '@/components/panels/chat-page-panel'
+import { ChampionJourneyPanel } from '@/components/panels/champion-journey-panel'
+import { ProjectAssessmentsPanel } from '@/components/panels/project-assessments-panel'
+import { BeltRequestsPanel } from '@/components/panels/belt-requests-panel'
+import { AttributionPanel } from '@/components/panels/attribution-panel'
 import {
   EscpAdminPanel,
   RegionsAdminPanel,
   AccountsAdminPanel,
   ProjectsAdminPanel,
   ChampionsAdminPanel,
+  BeltDefinitionsAdminPanel,
+  BeltRequirementsAdminPanel,
+  BeltCoursesAdminPanel,
   StructureAdminPanel,
   RolesAdminPanel,
 } from '@/components/panels/escp-admin-panel'
@@ -70,8 +77,11 @@ export default function Home() {
   const pathname = usePathname()
   const panelFromUrl = pathname === '/' ? 'overview' : pathname.slice(1)
   const panelAliases: Record<string, string> = {
+    journey: 'learning',
     sessions: 'chat',
     'super-admin': 'settings',
+    'belt-config': 'requirements',
+    courses: 'training',
   }
   const normalizedPanel = panelAliases[panelFromUrl] ?? panelFromUrl
 
@@ -88,7 +98,7 @@ export default function Home() {
     if (normalizedPanel === 'chat') {
       setChatPanelOpen(false)
     }
-    if (panelFromUrl === 'sessions') {
+    if (panelFromUrl !== normalizedPanel) {
       router.replace(panelHref(normalizedPanel))
     }
   }, [panelFromUrl, normalizedPanel, router, setActiveTab, setChatPanelOpen])
@@ -292,7 +302,7 @@ export default function Home() {
 }
 
 const ESSENTIAL_PANELS = new Set([
-  'overview', 'chat', 'activity', 'logs', 'settings',
+  'overview', 'chat', 'learning', 'activity', 'logs', 'settings',
 ])
 
 function ContentRouter({ tab }: { tab: string }) {
@@ -336,6 +346,15 @@ function ContentRouter({ tab }: { tab: string }) {
       return <Dashboard />
     case 'notifications':
       return <NotificationsPanel />
+    case 'journey':
+    case 'learning':
+      return <ChampionJourneyPanel />
+    case 'assessments':
+      return <ProjectAssessmentsPanel />
+    case 'requests':
+      return <BeltRequestsPanel />
+    case 'credits':
+      return <AttributionPanel />
     case 'logs':
       return <LogViewerPanel />
     case 'users':
@@ -348,6 +367,15 @@ function ContentRouter({ tab }: { tab: string }) {
       return <ProjectsAdminPanel />
     case 'champions':
       return <ChampionsAdminPanel />
+    case 'requirements':
+      return <BeltRequirementsAdminPanel />
+    case 'belts':
+      return <BeltDefinitionsAdminPanel />
+    case 'belt-config':
+      return <BeltRequirementsAdminPanel />
+    case 'training':
+    case 'courses':
+      return <BeltCoursesAdminPanel />
     case 'structure':
       return <StructureAdminPanel />
     case 'roles':

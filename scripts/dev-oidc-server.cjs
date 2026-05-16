@@ -51,9 +51,9 @@ const ISSUER      = `http://localhost:${PORT}`
 const CLIENT_ID   = process.env.MOCK_OIDC_CLIENT_ID         || 'test-client'
 const CLIENT_SECRET = process.env.MOCK_OIDC_SECRET          || 'test-secret'
 
-const TEST_EMAIL  = process.env.MOCK_USER_EMAIL              || 'test.rscp@endava.com'
-const TEST_NAME   = process.env.MOCK_USER_NAME               || 'Regional Test Champion'
-const TEST_OID    = process.env.MOCK_USER_OID                || 'mock-oid-000002'
+const TEST_EMAIL  = process.env.MOCK_USER_EMAIL              || 'artiom.iascisin@endava.com'
+const TEST_NAME   = process.env.MOCK_USER_NAME               || 'Artiom Iascisin'
+const TEST_OID    = process.env.MOCK_USER_OID                || 'mock-oid-artiom-001'
 
 // ── RSA key pair (generated fresh each run) ──────────────────────────────────
 
@@ -95,6 +95,7 @@ function makeIdToken(clientId, nonce) {
     preferred_username: TEST_EMAIL,
     oid: TEST_OID,           // Microsoft-specific claim
     tid: 'mock-tenant',      // Microsoft-specific claim
+    role: 'admin',           // Admin role for mock user
   })
 }
 
@@ -107,6 +108,7 @@ function makeAccessToken() {
     exp: now + 3600,
     email: TEST_EMAIL,
     scope: 'openid profile email',
+    role: 'admin',           // Admin role for mock user
   })
 }
 
@@ -234,6 +236,7 @@ const server = http.createServer((req, res) => {
       preferred_username: TEST_EMAIL,
       oid:                TEST_OID,
       tid:                'mock-tenant',
+      role:               'admin',
     }))
     return
   }
